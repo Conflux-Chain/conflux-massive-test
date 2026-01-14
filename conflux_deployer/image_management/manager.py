@@ -8,6 +8,8 @@ Responsible for:
 - Managing image lifecycle
 """
 
+import os
+import shlex
 import time
 from typing import Dict, Optional, List
 from datetime import datetime
@@ -17,6 +19,7 @@ from loguru import logger
 from ..configs import (
     DeploymentConfig,
     CloudProvider,
+    InstanceInfo,
     InstanceState,
 )
 from ..cloud import (
@@ -26,6 +29,7 @@ from ..cloud import (
     get_default_security_rules,
 )
 from ..configs.loader import StateManager
+from ..utils.remote import RemoteExecutor
 
 
 def generate_user_data_script(
@@ -51,7 +55,10 @@ def generate_user_data_script(
     packages_str = " ".join(additional_packages)
     
     script = f'''#!/bin/bash
-set -e
+set -euo pipefail
+
+# If anything fails, mark it so the image builder can detect the failure.
+trap 'echo "=== ERROR during Conflux node image setup ==="; touch /var/lib/conflux-setup-failed' ERR
 
 # Log all output
 exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
@@ -62,15 +69,15 @@ echo "Timestamp: $(date)"
 # Wait for cloud-init to finish
 cloud-init status --wait || true
 
-# Update system
+# Update system (with basic retries)
 echo "=== Updating system packages ==="
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get upgrade -y
+for i in 1 2 3; do apt-get update -y && break || sleep 10; done
+for i in 1 2 3; do apt-get upgrade -y && break || sleep 10; done
 
 # Install required packages
 echo "=== Installing required packages ==="
-apt-get install -y {packages_str}
+for i in 1 2 3; do apt-get install -y {packages_str} && break || sleep 10; done
 
 # Start Docker
 echo "=== Starting Docker service ==="
@@ -80,9 +87,9 @@ systemctl start docker
 # Wait for Docker to be ready
 sleep 5
 
-# Pull Conflux Docker image
+# Pull Conflux Docker image (retry for flaky networks)
 echo "=== Pulling Conflux Docker image: {conflux_docker_image} ==="
-docker pull {conflux_docker_image}
+for i in 1 2 3 4 5; do docker pull {conflux_docker_image} && break || sleep 15; done
 
 # Create Conflux data directory
 echo "=== Creating directories ==="
@@ -177,6 +184,115 @@ class ImageManager:
         self.factory = get_cloud_factory()
         self._temp_instances: Dict[str, List[str]] = {}  # region -> instance_ids
         self._temp_security_groups: Dict[str, str] = {}  # region -> sg_id
+
+    def _resolve_ssh_key_path(self) -> Optional[str]:
+        key_path = self.config.ssh_private_key_path
+        if not key_path:
+            return None
+        return os.path.expanduser(str(key_path))
+
+    def _pick_reachable_host(self, instance: "InstanceInfo") -> Optional[str]:
+        # Prefer public IP; fall back to private only if caller can route.
+        return instance.public_ip or instance.private_ip
+
+    def _wait_for_image_builder_ready(
+        self,
+        host: str,
+        conflux_docker_image: str,
+        timeout_seconds: int = 1800,
+    ) -> None:
+        """Wait until user-data has completed and docker image is present.
+
+        This makes image creation deterministic instead of relying on fixed sleeps.
+        """
+
+        ssh_key_path = self._resolve_ssh_key_path()
+        if not ssh_key_path:
+            logger.warning(
+                "ssh_private_key_path is not set; falling back to fixed sleeps and cannot verify image build completion"
+            )
+            time.sleep(420)
+            return
+
+        def _try_with_user(user: str) -> Optional[RemoteExecutor]:
+            executor = RemoteExecutor(
+                ssh_key_path=ssh_key_path,
+                ssh_user=user,
+                known_hosts=None,
+                connect_timeout=15.0,
+                keepalive_interval=30.0,
+            )
+            probe = executor.execute_on_host(host, "true", retry=1, timeout=20)
+            return executor if probe.success else None
+
+        executor = _try_with_user("ubuntu") or _try_with_user("root")
+        if executor is None:
+            raise RuntimeError(
+                f"Unable to SSH into image builder instance at {host}. "
+                "Check public IP routing, security group ingress (tcp/22), and ssh_private_key_path."
+            )
+
+        image_q = shlex.quote(conflux_docker_image)
+
+        start = time.time()
+        last_tail = ""
+        last_status = ""
+        poll_interval = 10
+        while time.time() - start < timeout_seconds:
+            # If setup explicitly failed, surface the logs.
+            failed = executor.execute_on_host(host, "sudo test -f /var/lib/conflux-setup-failed", retry=0, timeout=20)
+            if failed.success:
+                tail = executor.execute_on_host(host, "sudo tail -n 200 /var/log/user-data.log || true", retry=0, timeout=30)
+                raise RuntimeError(
+                    "Image builder user-data reported failure. "
+                    f"Last logs:\n{tail.stdout.strip()}\n{tail.stderr.strip()}"
+                )
+
+            # Best-effort cloud-init status (some images may not have it).
+            ci = executor.execute_on_host(host, "sudo cloud-init status --long || true", retry=0, timeout=30)
+            if ci.stdout:
+                last_status = ci.stdout.strip()
+
+            complete = executor.execute_on_host(host, "sudo test -f /var/lib/conflux-setup-complete", retry=0, timeout=20)
+            if complete.success:
+                # Ensure docker is running and image is present.
+                docker_ok = executor.execute_on_host(
+                    host,
+                    "sudo systemctl is-active --quiet docker && sudo docker info >/dev/null 2>&1",
+                    retry=1,
+                    timeout=60,
+                )
+                image_ok = executor.execute_on_host(
+                    host,
+                    f"sudo docker image inspect {image_q} >/dev/null 2>&1",
+                    retry=1,
+                    timeout=60,
+                )
+                script_ok = executor.execute_on_host(
+                    host,
+                    "sudo test -x /usr/local/bin/start_conflux.sh",
+                    retry=0,
+                    timeout=20,
+                )
+
+                if docker_ok.success and image_ok.success and script_ok.success:
+                    logger.info("Image builder setup complete (marker + docker image verified)")
+                    return
+
+            # Periodically capture tail for debugging.
+            if int(time.time() - start) % 60 < poll_interval:
+                tail = executor.execute_on_host(host, "sudo tail -n 50 /var/log/user-data.log || true", retry=0, timeout=30)
+                if tail.stdout:
+                    last_tail = tail.stdout.strip()
+
+            time.sleep(poll_interval)
+
+        msg = f"Timeout waiting for image builder setup after {timeout_seconds}s."
+        if last_status:
+            msg += f"\ncloud-init status:\n{last_status}"
+        if last_tail:
+            msg += f"\nLast /var/log/user-data.log tail:\n{last_tail}"
+        raise TimeoutError(msg)
     
     def _get_image_name(self, provider: CloudProvider, region_id: str) -> str:
         """Generate the image name for a provider/region combination"""
@@ -345,27 +461,25 @@ class ImageManager:
             
             # Wait for instance to be running
             logger.info("Waiting for instance to be running...")
-            cloud.wait_for_instances_running([instance_id], timeout_seconds=300)
-            
-            # Wait for setup to complete (user data script)
-            # The script creates a marker file when done
-            logger.info("Waiting for setup script to complete (this may take 5-10 minutes)...")
-            time.sleep(300)  # Wait 5 minutes for setup
-            
-            # Additional wait time for Docker image pull
-            time.sleep(120)  # 2 more minutes
-            
-            # Stop the instance before creating image
-            logger.info("Stopping instance before creating image...")
-            cloud.stop_instances([instance_id])
-            
-            # Wait for instance to stop
-            start_time = time.time()
-            while time.time() - start_time < 300:
-                status = cloud.get_instance_status([instance_id])
-                if instance_id in status and status[instance_id].state == InstanceState.STOPPED:
-                    break
-                time.sleep(10)
+            statuses = cloud.wait_for_instances_running([instance_id], timeout_seconds=600)
+            if instance_id in statuses:
+                temp_instance = statuses[instance_id]
+
+            host = self._pick_reachable_host(temp_instance)
+            if host:
+                logger.info(
+                    "Waiting for image builder setup to complete (cloud-init + marker + docker image; this may take 5-20 minutes)..."
+                )
+                self._wait_for_image_builder_ready(
+                    host=host,
+                    conflux_docker_image=self.config.image.conflux_docker_image,
+                    timeout_seconds=1800,
+                )
+            else:
+                logger.warning(
+                    "Image builder instance has no IP (public/private). Falling back to fixed sleep and cannot verify build completion."
+                )
+                time.sleep(420)
             
             # Create image
             logger.info(f"Creating image {image_name}...")
