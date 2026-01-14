@@ -26,6 +26,7 @@ from ..configs import (
 )
 from ..cloud import CloudProviderBase, get_cloud_factory
 from ..configs.loader import StateManager
+from ..utils.naming import INSTANCE_NAME_FIXED_PREFIX, build_instance_name_prefix
 
 
 class ResourceCleanupManager:
@@ -54,7 +55,8 @@ class ResourceCleanupManager:
         """
         self.config = config
         self.state_manager = state_manager
-        self.factory = get_cloud_factory()
+        # Typed as Any to allow test injection of a fake factory.
+        self.factory: Any = get_cloud_factory()
         self._cleanup_config = config.cleanup
     
     def _get_provider(self, provider: CloudProvider, region_id: str) -> CloudProviderBase:
@@ -160,6 +162,132 @@ class ResourceCleanupManager:
         success_count = sum(1 for v in results.values() if v)
         logger.info(f"Terminated {success_count}/{len(results)} instances")
         
+        return results
+
+    def _list_all_instances_for_cleanup(self, cloud: CloudProviderBase) -> List[InstanceInfo]:
+        """Return instances visible to this account/region for cleanup purposes.
+
+        This is a small seam intended for unit tests to mock. In production we
+        prefer using tags to avoid scanning the entire account.
+        """
+
+        try:
+            return cloud.list_instances_by_tag("CreatedBy", "conflux-deployer")
+        except Exception:
+            # Fallback to name prefix scan where tag filtering isn't available.
+            return cloud.list_instances_by_name_prefix(INSTANCE_NAME_FIXED_PREFIX)
+
+    def force_stop_and_delete_instances_from_state_file(
+        self,
+        state_file_path: str,
+        *,
+        dry_run: bool = False,
+    ) -> Dict[str, bool]:
+        """Force stop and delete instances by naming pattern derived from a state file.
+
+        The state file is used only as a source of deployment_id; we do NOT trust
+        or use instance IDs recorded in local files.
+        """
+
+        sm = StateManager(state_file_path)
+        state = sm.load()
+        deployment_id = (state.deployment_id if state else None) or str(self.config.deployment_id)
+
+        results: Dict[str, bool] = {}
+
+        for region_config in self.config.regions:
+            cloud = self._get_provider(region_config.provider, region_config.region_id)
+            name_prefix = build_instance_name_prefix(
+                deployment_id=str(deployment_id),
+                region_id=str(region_config.region_id),
+                user_prefix=str(self.config.instance_name_prefix),
+            )
+
+            # Enumerate instances and filter by naming pattern
+            all_instances = self._list_all_instances_for_cleanup(cloud)
+            matched = [i for i in all_instances if (i.name or "").startswith(name_prefix)]
+            if not matched:
+                continue
+
+            instance_ids = [i.instance_id for i in matched]
+            region_key = f"{region_config.provider.value}:{region_config.region_id}"
+            logger.info(f"Found {len(instance_ids)} instances by state-derived name prefix in {region_key}")
+
+            if dry_run:
+                logger.warning(f"DRY RUN: would stop+terminate {len(instance_ids)} instances in {region_key}")
+                for instance_id in instance_ids:
+                    results[instance_id] = True
+                continue
+
+            # Best-effort stop first
+            try:
+                cloud.stop_instances(instance_ids)
+            except Exception as e:
+                logger.warning(f"Failed to stop instances in {region_key} (continuing): {e}")
+
+            term_results = cloud.terminate_instances(instance_ids)
+            results.update(term_results)
+
+        return results
+
+    def force_stop_and_delete_instances_by_naming_pattern(
+        self,
+        *,
+        deployment_id: Optional[str] = None,
+        pattern_prefix: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, bool]:
+        """Force stop and delete instances found by the special naming pattern.
+
+        This mode searches instances by name prefix, not local state.
+
+        Args:
+            deployment_id: If provided, narrows matches to this deployment id.
+            pattern_prefix: Optional explicit prefix override. If omitted, uses
+                the standard naming convention.
+        """
+
+        effective_deployment_id = deployment_id or str(self.config.deployment_id)
+        results: Dict[str, bool] = {}
+
+        for region_config in self.config.regions:
+            cloud = self._get_provider(region_config.provider, region_config.region_id)
+
+            if pattern_prefix is not None:
+                name_prefix = pattern_prefix
+            else:
+                name_prefix = build_instance_name_prefix(
+                    deployment_id=str(effective_deployment_id),
+                    region_id=str(region_config.region_id),
+                    user_prefix=str(self.config.instance_name_prefix),
+                )
+
+            # Safety: if user passes something empty, fall back to fixed prefix
+            if not name_prefix:
+                name_prefix = INSTANCE_NAME_FIXED_PREFIX
+
+            instances = cloud.list_instances_by_name_prefix(name_prefix)
+            if not instances:
+                continue
+
+            instance_ids = [i.instance_id for i in instances]
+            region_key = f"{region_config.provider.value}:{region_config.region_id}"
+            logger.info(f"Found {len(instance_ids)} instances by name prefix in {region_key}")
+
+            if dry_run:
+                logger.warning(f"DRY RUN: would stop+terminate {len(instance_ids)} instances in {region_key}")
+                for instance_id in instance_ids:
+                    results[instance_id] = True
+                continue
+
+            try:
+                cloud.stop_instances(instance_ids)
+            except Exception as e:
+                logger.warning(f"Failed to stop instances in {region_key} (continuing): {e}")
+
+            term_results = cloud.terminate_instances(instance_ids)
+            results.update(term_results)
+
         return results
     
     def _terminate_by_tag(self) -> Dict[str, bool]:

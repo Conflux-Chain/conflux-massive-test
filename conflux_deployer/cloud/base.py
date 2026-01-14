@@ -188,6 +188,11 @@ class CloudProviderBase(ABC):
             List of matching InstanceInfo
         """
         pass
+
+    @abstractmethod
+    def list_instances_by_name_prefix(self, name_prefix: str) -> List[InstanceInfo]:
+        """List instances whose Name/instance_name starts with the given prefix."""
+        pass
     
     # ==================== Image Operations ====================
     

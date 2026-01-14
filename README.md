@@ -1,3 +1,9 @@
+```bash
+conflux-deployer force-instances --mode state -c config.json --state-file ./deployment_state.json
+conflux-deployer force-instances --mode pattern -c config.json --deployment-id deploy-20250101-010101-deadbeef
+conflux-deployer force-instances --mode pattern -c config.json --pattern-prefix "conflux-deployer-mytest-deploy-abc-us-west-2"
+```
+
 # Conflux Deployer Framework
 
 A Python framework for deploying Conflux private chain networks across multiple countries/regions on AWS and Alibaba Cloud platforms, and executing stress tests and other related tests.

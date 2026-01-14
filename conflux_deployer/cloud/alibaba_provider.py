@@ -460,6 +460,16 @@ class AlibabaProvider(CloudProviderBase):
             
         except Exception as e:
             raise RuntimeError(f"Failed to list instances by tag: {e}")
+
+    def list_instances_by_name_prefix(self, name_prefix: str) -> List[InstanceInfo]:
+        """List ECS instances whose instance_name starts with the given prefix.
+
+        Alibaba ECS doesn't provide an efficient prefix filter in this SDK wrapper,
+        so we list instances tagged as CreatedBy=conflux-deployer and filter locally.
+        """
+
+        candidates = self.list_instances_by_tag("CreatedBy", "conflux-deployer")
+        return [i for i in candidates if (i.name or "").startswith(name_prefix)]
     
     # ==================== Image Operations ====================
     

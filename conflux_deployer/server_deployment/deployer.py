@@ -31,6 +31,7 @@ from ..cloud import (
     get_default_security_rules,
 )
 from ..configs.loader import StateManager
+from ..utils.naming import build_instance_name_prefix
 
 
 @dataclass
@@ -224,7 +225,11 @@ class ServerDeployer:
                 f"({nodes_per_instance} nodes each) in {plan.location_name}"
             )
             
-            name_prefix = f"{self.config.instance_name_prefix}-{plan.region_id}"
+            name_prefix = build_instance_name_prefix(
+                deployment_id=str(self.config.deployment_id),
+                region_id=str(plan.region_id),
+                user_prefix=str(self.config.instance_name_prefix),
+            )
             
             try:
                 launched = cloud.launch_instances(

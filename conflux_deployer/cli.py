@@ -21,6 +21,8 @@ from loguru import logger
 from .main import ConfluxDeployer, deploy_and_test
 from .configs import DeploymentConfig
 from .configs.loader import ConfigLoader
+from .configs.loader import StateManager
+from .resource_cleanup import ResourceCleanupManager
 
 
 def setup_logger(verbose: bool = False):
@@ -164,6 +166,48 @@ def cleanup_command(args):
         
     except Exception as e:
         logger.error(f"Cleanup failed: {e}")
+        return 1
+
+
+# === Force Instances Cleanup Command ===
+
+def force_instances_command(args):
+    """Force stop and delete instances (two modes: state file or naming pattern)."""
+
+    setup_logger(args.verbose)
+
+    try:
+        config = ConfigLoader.load_from_file(args.config)
+
+        if args.mode == "state":
+            state_file_path = args.state_file or config.state_file_path
+            cleanup_mgr = ResourceCleanupManager(config, StateManager(state_file_path))
+            results = cleanup_mgr.force_stop_and_delete_instances_from_state_file(
+                state_file_path,
+                dry_run=bool(args.dry_run),
+            )
+
+        elif args.mode == "pattern":
+            # Requires config for credentials/regions; uses naming pattern instead of state.
+            cleanup_mgr = ResourceCleanupManager(config, StateManager(config.state_file_path))
+            results = cleanup_mgr.force_stop_and_delete_instances_by_naming_pattern(
+                deployment_id=args.deployment_id,
+                pattern_prefix=args.pattern_prefix,
+                dry_run=bool(args.dry_run),
+            )
+        else:
+            raise ValueError(f"Unsupported mode: {args.mode}")
+
+        ok = sum(1 for v in results.values() if v)
+        total = len(results)
+        if args.dry_run:
+            logger.info(f"Dry-run completed: {total} instances matched")
+            return 0
+        logger.info(f"Force instance cleanup completed: {ok}/{total} terminated")
+        return 0 if ok == total else 1
+
+    except Exception as e:
+        logger.error(f"Force instance cleanup failed: {e}")
         return 1
 
 
@@ -389,30 +433,36 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Initialize a new config file
-  conflux-deployer init -o config.json
+# Initialize a new config file
+conflux-deployer init -o config.json
 
-  # Deploy servers and nodes
-  conflux-deployer deploy -c config.json
+# Deploy servers and nodes
+conflux-deployer deploy -c config.json
 
-  # Run all tests
-  conflux-deployer test all -c config.json
+# Run all tests
+conflux-deployer test all -c config.json
 
-  # Run stress test only
-  conflux-deployer test stress -c config.json --duration 600
+# Run stress test only
+conflux-deployer test stress -c config.json --duration 600
 
-  # Check deployment status
-  conflux-deployer status -c config.json
+# Check deployment status
+conflux-deployer status -c config.json
 
-  # Clean up all resources
-  conflux-deployer cleanup -c config.json
+# Clean up all resources
+conflux-deployer cleanup -c config.json
 
-  # Force cleanup including images
-  conflux-deployer cleanup -c config.json --force --delete-images
+# Force cleanup including images
+conflux-deployer cleanup -c config.json --force --delete-images
 
-  # Recover from interrupted deployment
-  conflux-deployer recover -s state/deployment-id.json
-        """
+# Force stop+delete instances recorded in a local state file
+conflux-deployer force-instances --mode state -c config.json --state-file ./deployment_state.json
+
+# Force stop+delete instances by naming pattern (no local state required)
+conflux-deployer force-instances --mode pattern -c config.json --deployment-id deploy-20250101-010101-deadbeef
+
+# Recover from interrupted deployment
+conflux-deployer recover -s state/deployment-id.json
+"""
     )
     
     # Global arguments
@@ -449,6 +499,36 @@ Examples:
     cleanup_parser.add_argument("-f", "--force", action="store_true", help="Force cleanup")
     cleanup_parser.add_argument("--delete-images", action="store_true", help="Also delete server images")
     cleanup_parser.set_defaults(func=cleanup_command)
+
+    # Force instances cleanup command
+    fi_parser = subparsers.add_parser(
+        "force-instances",
+        help="Force stop and delete server instances (by state file or naming pattern)",
+    )
+    fi_parser.add_argument(
+        "--mode",
+        choices=["state", "pattern"],
+        required=True,
+        help="Cleanup mode: state=use local state file; pattern=search by instance naming pattern",
+    )
+    fi_parser.add_argument(
+        "--state-file",
+        help="State file path for mode=state (default: config.state_file_path)",
+    )
+    fi_parser.add_argument(
+        "--deployment-id",
+        help="Optional deployment id to narrow mode=pattern",
+    )
+    fi_parser.add_argument(
+        "--pattern-prefix",
+        help="Optional explicit name prefix override for mode=pattern",
+    )
+    fi_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not stop/terminate; only report matched instances",
+    )
+    fi_parser.set_defaults(func=force_instances_command)
     
     # Recover command
     recover_parser = subparsers.add_parser("recover", help="Recover from interrupted deployment")

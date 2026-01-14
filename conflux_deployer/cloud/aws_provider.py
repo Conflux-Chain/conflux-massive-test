@@ -156,6 +156,7 @@ class AWSProvider(CloudProviderBase):
         
         # Add deployment tag for identification
         tag_specs[0]["Tags"].append({"Key": "DeploymentPrefix", "Value": name_prefix})
+        tag_specs[0]["Tags"].append({"Key": "CreatedBy", "Value": "conflux-deployer"})
         
         launch_params["TagSpecifications"] = tag_specs
         
@@ -389,6 +390,50 @@ class AWSProvider(CloudProviderBase):
             
         except ClientError as e:
             raise RuntimeError(f"Failed to list instances by tag: {e}")
+
+    def list_instances_by_name_prefix(self, name_prefix: str) -> List[InstanceInfo]:
+        """List EC2 instances whose Name tag starts with the given prefix."""
+        try:
+            response = self.ec2_client.describe_instances(
+                Filters=[
+                    {"Name": "tag:Name", "Values": [f"{name_prefix}*"]},
+                    {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
+                ]
+            )
+
+            instances: List[InstanceInfo] = []
+            for reservation in response.get("Reservations", []):
+                for instance in reservation.get("Instances", []):
+                    name = ""
+                    location_name = self.region_id
+                    nodes_count = 1
+                    for tag in instance.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                        elif tag["Key"] == "LocationName":
+                            location_name = tag["Value"]
+                        elif tag["Key"] == "NodesCount":
+                            nodes_count = int(tag["Value"])
+
+                    instances.append(
+                        InstanceInfo(
+                            instance_id=instance["InstanceId"],
+                            provider=CloudProvider.AWS,
+                            region_id=self.region_id,
+                            location_name=location_name,
+                            instance_type=instance["InstanceType"],
+                            public_ip=instance.get("PublicIpAddress"),
+                            private_ip=instance.get("PrivateIpAddress"),
+                            state=AWS_STATE_MAP.get(instance["State"]["Name"], InstanceState.UNKNOWN),
+                            nodes_count=nodes_count,
+                            name=name,
+                            launch_time=instance["LaunchTime"].isoformat() if instance.get("LaunchTime") else None,
+                        )
+                    )
+
+            return instances
+        except ClientError as e:
+            raise RuntimeError(f"Failed to list instances by name prefix: {e}")
     
     # ==================== Image Operations ====================
     
