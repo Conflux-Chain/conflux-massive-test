@@ -313,10 +313,20 @@ def status_command(args):
         
         if state.nodes:
             logger.info(f"Nodes: {len(state.nodes)}")
+
+            def _node_field(n, *names):
+                for name in names:
+                    if isinstance(n, dict) and name in n:
+                        return n[name]
+                    if hasattr(n, name):
+                        return getattr(n, name)
+                return None
+
             for node in state.nodes:
-                logger.info(
-                    f"  {node.node_id}: RPC={node.rpc_port}, P2P={node.p2p_port}"
-                )
+                node_id = _node_field(node, "node_id", "id") or "<unknown>"
+                rpc_port = _node_field(node, "jsonrpc_port", "rpc_port") or "<unknown>"
+                p2p_port = _node_field(node, "p2p_port") or "<unknown>"
+                logger.info(f"  {node_id}: RPC={rpc_port}, P2P={p2p_port}")
         
         # Cost estimate
         cost = deployer.estimate_cost()

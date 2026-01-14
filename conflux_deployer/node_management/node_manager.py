@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
-from conflux_deployer.configs import ConfigManager
-from conflux_deployer.server_deployment import ServerInstance
+from conflux_deployer.configs.config_manager import ConfigManager
+from conflux_deployer.server_deployment.server_deployer import ServerInstance
 
 
 @dataclass
@@ -36,6 +36,8 @@ class NodeManager:
         self.config_manager = config_manager
         self.nodes: Dict[str, NodeInfo] = {}
         self.instance_nodes: Dict[str, List[str]] = {}
+        # Port allocations per instance_id -> allocation offset (int)
+        self.port_allocations: Dict[str, int] = {}
         self.state_file = Path("node_state.pkl")
         self._load_state()
     
@@ -48,13 +50,22 @@ class NodeManager:
         base_port = conflux_config.get("base_port", 12537)
         base_rpc_port = conflux_config.get("base_rpc_port", 12539)
         base_p2p_port = conflux_config.get("base_p2p_port", 12538)
-        
+        ports_block = int(conflux_config.get("ports_block_size", 1000))
+
+        # Allocate a per-instance block of ports (persisted) to avoid collisions
+        if instance.instance_id not in self.port_allocations:
+            # Find next available offset (start from 0)
+            used_offsets = sorted(self.port_allocations.values())
+            next_offset = (used_offsets[-1] + ports_block) if used_offsets else 0
+            self.port_allocations[instance.instance_id] = next_offset
+        allocation_offset = self.port_allocations[instance.instance_id]
+
         # Generate node info for each node on the instance
         for i in range(instance.nodes_count):
             node_id = f"node-{instance.instance_id}-{i}"
-            port = base_port + i
-            rpc_port = base_rpc_port + i
-            p2p_port = base_p2p_port + i
+            port = base_port + allocation_offset + i
+            rpc_port = base_rpc_port + allocation_offset + i
+            p2p_port = base_p2p_port + allocation_offset + i
             
             node_info = NodeInfo(
                 node_id=node_id,
@@ -192,7 +203,8 @@ class NodeManager:
         try:
             state = {
                 "nodes": self.nodes,
-                "instance_nodes": self.instance_nodes
+                "instance_nodes": self.instance_nodes,
+                "port_allocations": self.port_allocations,
             }
             with open(self.state_file, 'wb') as f:
                 pickle.dump(state, f)
@@ -208,6 +220,7 @@ class NodeManager:
                     state = pickle.load(f)
                 self.nodes = state.get("nodes", {})
                 self.instance_nodes = state.get("instance_nodes", {})
+                self.port_allocations = state.get("port_allocations", {})
                 logger.info(f"Node state loaded from {self.state_file}")
                 logger.info(f"Loaded {len(self.nodes)} nodes from state")
             except Exception as e:

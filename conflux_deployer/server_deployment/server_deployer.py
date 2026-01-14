@@ -5,8 +5,8 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 
 from loguru import logger
-from conflux_deployer.configs import ConfigManager
-from conflux_deployer.cloud_accounts import CloudAccountManager
+from conflux_deployer.configs.config_manager import ConfigManager
+from conflux_deployer.cloud_accounts.account_manager import CloudAccountManager
 from conflux_deployer.image_management import ImageManager
 
 
@@ -47,7 +47,8 @@ class ServerDeployer:
         # Get or create server image
         base_image_id = instance_config.get("base_image_id")
         image_name = f"conflux-node-{cloud_provider}-{region}-{int(time.time())}"
-        image_info = self.image_manager.create_image(cloud_provider, region, base_image_id, image_name, purpose)
+        # Create or find an image for this provider/region
+        image_info = self.image_manager.create_image(CloudProvider(cloud_provider), region)
         
         # Deploy instances
         instances = []
