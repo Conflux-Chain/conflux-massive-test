@@ -167,14 +167,29 @@ class NodeManager:
         nodes = []
         node_id = 0
         
+        import hashlib
+
+        ports_block = int(getattr(self.config.conflux_node, "ports_block_size", 1000))
+        base_p2p = self.config.conflux_node.p2p_port_base
+        base_jsonrpc = self.config.conflux_node.jsonrpc_port_base
+
+        # Compute maximum number of non-overlapping blocks that fit in port range
+        max_port = 65535
+        max_blocks = max(1, (max_port - max(base_p2p, base_jsonrpc)) // ports_block)
+
         for instance in self.instances:
             if not instance.public_ip:
                 continue
-            
+
+            # Deterministic block index per instance using hash, avoids state persistence
+            digest = hashlib.sha256(instance.instance_id.encode()).digest()[:4]
+            block_index = int.from_bytes(digest, "big") % max_blocks
+            allocation_offset = block_index * ports_block
+
             for node_index in range(instance.nodes_count):
-                p2p_port = self.config.conflux_node.p2p_port_base + node_index * 10
-                jsonrpc_port = self.config.conflux_node.jsonrpc_port_base + node_index * 10
-                
+                p2p_port = base_p2p + allocation_offset + node_index
+                jsonrpc_port = base_jsonrpc + allocation_offset + node_index
+
                 node = NodeInfo(
                     node_id=f"node-{node_id}",
                     instance_info=instance,
@@ -184,8 +199,13 @@ class NodeManager:
                 )
                 nodes.append(node)
                 node_id += 1
-        
+
         return nodes
+
+    def list_nodes_by_instance(self, instance_id: str) -> List[NodeInfo]:
+        """Return all nodes that belong to the specified instance."""
+        return [n for n in self._nodes if getattr(n.instance_info, "instance_id", None) == instance_id
+        ]
     
     def initialize_nodes(self) -> List[NodeInfo]:
         """

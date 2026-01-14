@@ -180,6 +180,8 @@ class ConfluxNodeConfig:
     chain_id: int = 1
     # Additional config parameters
     extra_config: Dict[str, Any] = field(default_factory=dict)
+    # Block size of ports reserved per instance (to avoid cross-instance collision)
+    ports_block_size: int = 1000
     
     @property
     def p2p_port(self) -> int:
@@ -209,6 +211,8 @@ class NetworkConfig:
     target_tps: int = 1000
     # Genesis secrets file path
     genesis_secrets_path: Optional[str] = None
+    # Debug mode to increase logging verbosity
+    debug_mode: bool = False
 
 
 @dataclass
@@ -241,6 +245,11 @@ class CleanupConfig:
     grace_period_seconds: int = 60
     # Retry attempts for cleanup operations
     retry_attempts: int = 3
+
+    @property
+    def auto_cleanup(self) -> bool:
+        """Backward compatible alias for auto_terminate"""
+        return self.auto_terminate
 
 
 @dataclass

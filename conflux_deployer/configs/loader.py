@@ -92,6 +92,18 @@ class ConfigLoader:
             existing_images=image_data.get("existing_images", {}),
         )
         
+        # Parse network config
+        network_data = data.get("network", {})
+        network_config = NetworkConfig(
+            connect_peers=network_data.get("connect_peers", 3),
+            bandwidth_mbit=network_data.get("bandwidth_mbit", 20),
+            enable_tx_propagation=network_data.get("enable_tx_propagation", True),
+            block_generation_period_ms=network_data.get("block_generation_period_ms", 500),
+            target_tps=network_data.get("target_tps", 1000),
+            genesis_secrets_path=network_data.get("genesis_secrets_path"),
+            debug_mode=network_data.get("debug_mode", False),
+        )
+
         # Parse Conflux node config
         node_data = data.get("conflux_node", {})
         conflux_node_config = ConfluxNodeConfig(
@@ -103,17 +115,7 @@ class ConfigLoader:
             mining_author=node_data.get("mining_author"),
             chain_id=node_data.get("chain_id", 1),
             extra_config=node_data.get("extra_config", {}),
-        )
-        
-        # Parse network config
-        network_data = data.get("network", {})
-        network_config = NetworkConfig(
-            connect_peers=network_data.get("connect_peers", 3),
-            bandwidth_mbit=network_data.get("bandwidth_mbit", 20),
-            enable_tx_propagation=network_data.get("enable_tx_propagation", True),
-            block_generation_period_ms=network_data.get("block_generation_period_ms", 500),
-            target_tps=network_data.get("target_tps", 1000),
-            genesis_secrets_path=network_data.get("genesis_secrets_path"),
+            ports_block_size=node_data.get("ports_block_size", 1000),
         )
         
         # Parse test config
@@ -131,7 +133,7 @@ class ConfigLoader:
         # Parse cleanup config
         cleanup_data = data.get("cleanup", {})
         cleanup_config = CleanupConfig(
-            auto_terminate=cleanup_data.get("auto_terminate", True),
+            auto_terminate=cleanup_data.get("auto_cleanup", cleanup_data.get("auto_terminate", True)),
             delete_images=cleanup_data.get("delete_images", False),
             grace_period_seconds=cleanup_data.get("grace_period_seconds", 60),
             retry_attempts=cleanup_data.get("retry_attempts", 3),
@@ -218,7 +220,7 @@ class ConfigLoader:
                 "custom_params": config.test.custom_params,
             },
             "cleanup": {
-                "auto_terminate": config.cleanup.auto_terminate,
+                "auto_cleanup": config.cleanup.auto_terminate,
                 "delete_images": config.cleanup.delete_images,
                 "grace_period_seconds": config.cleanup.grace_period_seconds,
                 "retry_attempts": config.cleanup.retry_attempts,

@@ -445,6 +445,70 @@ class ConfluxDeployer:
             Cost estimates
         """
         return self.cleanup_manager.estimate_running_cost()
+
+    def get_inventory(self) -> List[Dict[str, Any]]:
+        """Return an inventory of servers and node ports for external use.
+
+        Each entry contains:
+            - instance_id, provider, region_id, location_name
+            - instance_type, hardware (spec dict where available)
+            - public_ip, private_ip
+            - nodes: list of {node_id, jsonrpc_port, p2p_port, node_index, status}
+        """
+        from .configs import AWS_INSTANCE_SPECS, ALIBABA_INSTANCE_SPECS
+
+        inv: List[Dict[str, Any]] = []
+        instances = self.server_deployer.list_instances()
+
+        # Ensure node list is initialized
+        nodes = self.node_manager.initialize_nodes()
+
+        for inst in instances:
+            # Support both InstanceInfo and ServerInstance shapes
+            provider_attr = getattr(inst, "cloud_provider", None) or getattr(inst, "provider", None)
+            provider_str = provider_attr.value if not isinstance(provider_attr, str) and provider_attr is not None else provider_attr
+            region = getattr(inst, "region", None) or getattr(inst, "region_id", None)
+
+            # Find location name from config regions
+            location_name = None
+            for r in self.config.regions:
+                if r.region_id == region and r.provider.value == provider_str:
+                    location_name = r.location_name
+                    break
+
+            # Hardware/spec lookup
+            hw = None
+            if provider_str == "aws":
+                hw = AWS_INSTANCE_SPECS.get(inst.instance_type)
+            elif provider_str == "alibaba":
+                hw = ALIBABA_INSTANCE_SPECS.get(inst.instance_type)
+
+            instance_id = getattr(inst, "instance_id", None)
+            node_objs = self.node_manager.list_nodes_by_instance(instance_id)
+            node_list = [
+                {
+                    "node_id": n.node_id,
+                    "node_index": n.node_index,
+                    "jsonrpc_port": n.jsonrpc_port,
+                    "p2p_port": n.p2p_port,
+                    "status": getattr(n, "is_ready", getattr(n, "status", None)),
+                }
+                for n in node_objs
+            ]
+
+            inv.append({
+                "instance_id": inst.instance_id,
+                "provider": provider_str,
+                "region_id": region,
+                "location_name": location_name,
+                "instance_type": inst.instance_type,
+                "hardware": hw,
+                "public_ip": getattr(inst, "public_ip", None) or getattr(inst, "ip_address", None),
+                "private_ip": getattr(inst, "private_ip", None),
+                "nodes": node_list,
+            })
+
+        return inv
     
     # === Full Workflow ===
     
