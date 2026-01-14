@@ -219,7 +219,7 @@ class ServerDeployer:
                     internet_max_bandwidth_out=internet_max_bandwidth_out,
                     instance_charge_type="PostPaid",
                     system_disk=ecs_models.RunInstancesRequestSystemDisk(
-                        size=volume_size,
+                        size=str(volume_size),
                         category=str(instance_config.get("system_disk_category", "cloud_essd")),
                     ),
                 )

@@ -277,6 +277,12 @@ class SimpleGenerateThread(threading.Thread):
         self.max_block_size = max_block_size
 
     def run(self):
+        # Ensure these variables are always defined so static analyzers don't
+        # report possible 'maybe unbound' errors.
+        success = False
+        rpc_time = math.inf
+        error_msg = None
+
         try:
             start = time.time()
             hash = self.node.rpc.test_generateOneBlock(10000000, self.max_block_size)
