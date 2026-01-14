@@ -66,7 +66,7 @@ if __name__ == "__main__":
     # 4. 手动连接网络
     topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers)
     for k, v in topology.peers.items():
-        logger.debug(f"Node {nodes[k].id}({k}) has {len(v)} peers: {", ".join([str(i) for i in v])}")
+        logger.debug(f"Node {nodes[k].id}({k}) has {len(v)} peers: {', '.join([str(i) for i in v])}")
     connect_nodes(nodes, topology, min_peers=7)
     logger.success("拓扑网络构建完毕")
     wait_for_nodes_synced(nodes)
