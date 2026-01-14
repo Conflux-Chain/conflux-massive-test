@@ -1,12 +1,21 @@
-"""Cloud Server Deployer"""
+"""Cloud Server Deployer
 
+NOTE: This module is a legacy/simple deployer used by some tests and scripts.
+The main production deploy flow lives in conflux_deployer/server_deployment/deployer.py.
+"""
+
+import json
 import time
-from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from conflux_deployer.configs.config_manager import ConfigManager
+
+from alibabacloud_ecs20140526 import models as ecs_models
+
 from conflux_deployer.cloud_accounts.account_manager import CloudAccountManager
+from conflux_deployer.configs.config_manager import ConfigManager
+from conflux_deployer.configs.types import CloudProvider
 from conflux_deployer.image_management import ImageManager
 
 
@@ -176,30 +185,85 @@ class ServerDeployer:
     def _deploy_alibaba_servers(self, region: str, instance_type: str, count: int, image_id: str, purpose: str, nodes_per_instance: int) -> List[ServerInstance]:
         """Deploy Alibaba Cloud servers"""
         ecs_client = self.cloud_account_manager.get_alibaba_client(region)
-        
+
         # Get instance configuration
         instance_config = self.config_manager.get_instance_config(instance_type)
-        
+
         # Launch instances
         try:
-            # TODO: Implement Alibaba Cloud instance creation
-            # For now, return mock instances
-            instances = []
+            instances: List[ServerInstance] = []
+
+            security_group_id: Optional[str] = None
+            sg_ids = instance_config.get("security_group_ids")
+            if isinstance(sg_ids, list) and sg_ids:
+                security_group_id = str(sg_ids[0])
+            elif instance_config.get("security_group_id"):
+                security_group_id = str(instance_config.get("security_group_id"))
+
+            vswitch_id = instance_config.get("subnet_id")
+            key_pair_name = instance_config.get("key_name")
+            volume_size = int(instance_config.get("volume_size", 100))
+            internet_max_bandwidth_out = int(instance_config.get("internet_max_bandwidth_out", 100))
+
             for i in range(count):
-                instance_id = f"i-{int(time.time())}-{i}"
+                instance_name = f"conflux-{purpose}-{region}-{int(time.time())}-{i}"
+
+                request = ecs_models.RunInstancesRequest(
+                    region_id=region,
+                    image_id=image_id,
+                    instance_type=instance_type,
+                    instance_name=instance_name,
+                    host_name=instance_name.replace("_", "-"),
+                    amount=1,
+                    internet_charge_type="PayByTraffic",
+                    internet_max_bandwidth_out=internet_max_bandwidth_out,
+                    instance_charge_type="PostPaid",
+                    system_disk=ecs_models.RunInstancesRequestSystemDisk(
+                        size=volume_size,
+                        category=str(instance_config.get("system_disk_category", "cloud_essd")),
+                    ),
+                )
+
+                if security_group_id:
+                    request.security_group_id = security_group_id
+                if vswitch_id:
+                    request.v_switch_id = str(vswitch_id)
+                if key_pair_name:
+                    request.key_pair_name = str(key_pair_name)
+
+                request.tag = [
+                    ecs_models.RunInstancesRequestTag(key="Name", value=instance_name),
+                    ecs_models.RunInstancesRequestTag(key="Purpose", value=str(purpose)),
+                    ecs_models.RunInstancesRequestTag(key="ConfluxNodesCount", value=str(nodes_per_instance)),
+                ]
+
+                response = ecs_client.run_instances(request)
+
+                if not (response and getattr(response, "body", None)):
+                    raise RuntimeError("Invalid response from Alibaba ECS run_instances")
+
+                ids_container = getattr(response.body, "instance_id_sets", None)
+                if not ids_container or not getattr(ids_container, "instance_id_set", None):
+                    raise RuntimeError("No instance IDs returned from Alibaba ECS run_instances")
+
+                instance_id = str(ids_container.instance_id_set[0])
+                ip_address = self._wait_for_alibaba_instance_running(ecs_client, region, instance_id)
+
                 server_instance = ServerInstance(
                     instance_id=instance_id,
                     cloud_provider="alibaba",
                     region=region,
                     instance_type=instance_type,
-                    ip_address=f"192.168.1.{i+100}",
+                    ip_address=ip_address,
                     status="running",
                     purpose=purpose,
                     created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
-                    nodes_count=nodes_per_instance
+                    nodes_count=nodes_per_instance,
                 )
                 instances.append(server_instance)
+
             return instances
+
         except Exception as e:
             logger.error(f"Failed to launch Alibaba Cloud instances: {e}")
             # Try with alternative instance type if available
@@ -214,6 +278,51 @@ class ServerDeployer:
                 logger.info(f"Need {alternative_count} {alternative_type} instances to match capacity")
                 return self._deploy_alibaba_servers(region, alternative_type, alternative_count, image_id, purpose, alternative_nodes_per_instance)
             raise
+
+    def _wait_for_alibaba_instance_running(self, ecs_client: Any, region: str, instance_id: str, timeout_seconds: int = 600) -> str:
+        """Wait for Alibaba instance to be running and return best-effort IP (public preferred)."""
+        start = time.time()
+        while time.time() - start < timeout_seconds:
+            req = ecs_models.DescribeInstancesRequest(
+                region_id=region,
+                instance_ids=json.dumps([instance_id]),
+            )
+            resp = ecs_client.describe_instances(req)
+            body = getattr(resp, "body", None)
+            instances = getattr(getattr(body, "instances", None), "instance", None) if body else None
+            if not instances:
+                time.sleep(5)
+                continue
+
+            inst = instances[0]
+            status = str(getattr(inst, "status", ""))
+            if status != "Running":
+                time.sleep(5)
+                continue
+
+            public_ip = None
+            if getattr(inst, "public_ip_address", None) and getattr(inst.public_ip_address, "ip_address", None):
+                ip_list = inst.public_ip_address.ip_address
+                if ip_list:
+                    public_ip = ip_list[0]
+            if not public_ip and getattr(inst, "eip_address", None) and getattr(inst.eip_address, "ip_address", None):
+                public_ip = inst.eip_address.ip_address
+
+            private_ip = None
+            if getattr(inst, "vpc_attributes", None) and getattr(inst.vpc_attributes, "private_ip_address", None):
+                ip_list = getattr(inst.vpc_attributes.private_ip_address, "ip_address", None)
+                if ip_list:
+                    private_ip = ip_list[0]
+
+            ip = public_ip or private_ip
+            if ip:
+                logger.info(f"Alibaba instance {instance_id} is Running with IP {ip}")
+                return str(ip)
+
+            # Running but no IP yet
+            time.sleep(5)
+
+        raise TimeoutError(f"Timeout waiting for Alibaba instance {instance_id} to be Running")
     
     def _wait_for_aws_instance_running(self, ec2_client: Any, instance_id: str):
         """Wait for AWS instance to be running"""
@@ -246,8 +355,13 @@ class ServerDeployer:
     
     def _terminate_alibaba_instance(self, region: str, instance_id: str):
         """Terminate Alibaba Cloud instance"""
-        # TODO: Implement Alibaba Cloud instance termination
-        pass
+        ecs_client = self.cloud_account_manager.get_alibaba_client(region)
+        request = ecs_models.DeleteInstancesRequest(
+            region_id=region,
+            instance_id=[instance_id],
+            force=True,
+        )
+        ecs_client.delete_instances(request)
     
     def get_instance(self, instance_id: str) -> Optional[ServerInstance]:
         """Get server instance by ID"""

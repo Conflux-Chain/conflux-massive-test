@@ -484,7 +484,13 @@ class ConfluxDeployer:
         from .configs import AWS_INSTANCE_SPECS, ALIBABA_INSTANCE_SPECS
 
         inv: List[Dict[str, Any]] = []
-        instances = self.server_deployer.get_all_instances()
+        sd = self.server_deployer
+        if hasattr(sd, "get_all_instances"):
+            instances = sd.get_all_instances()
+        elif hasattr(sd, "list_instances"):
+            instances = sd.list_instances()
+        else:
+            instances = []
 
         # Ensure node list is initialized
         nodes = self.node_manager.initialize_nodes()

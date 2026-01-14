@@ -30,11 +30,18 @@ from typing import List, Optional
 from loguru import logger
 
 from remote_simulation.block_generator import generate_blocks_async
-from remote_simulation.launch_conflux_node import launch_remote_nodes, stop_remote_nodes, destory_remote_nodes
 from remote_simulation.network_connector import connect_nodes
 from remote_simulation.network_topology import NetworkTopology
 from remote_simulation.config_builder import SimulateOptions, ConfluxOptions, generate_config_file
-from remote_simulation.tools import collect_logs, init_tx_gen, wait_for_nodes_synced
+from remote_simulation.tools import init_tx_gen, wait_for_nodes_synced
+
+# AsyncSSH-based remote ops (no spawning大量 ssh/scp 子进程)
+from remote_simulation.async_remote import (
+    launch_remote_nodes_asyncssh,
+    stop_remote_nodes_asyncssh,
+    destroy_remote_nodes_asyncssh,
+    collect_logs_asyncssh,
+)
 
 from utils.wait_until import WaitUntilTimeoutError
 
@@ -54,6 +61,7 @@ def run_simulation(
     log_path: Optional[str] = None,
     simulation_config: Optional[SimulateOptions] = None,
     node_config: Optional[ConfluxOptions] = None,
+    ssh_key_path: Optional[str] = None,
 ):
     """
     Run the Conflux simulation on given instances.
@@ -101,12 +109,19 @@ def run_simulation(
     Path(log_path).mkdir(parents=True, exist_ok=True)
     
     # 3. Launch nodes
-    nodes = launch_remote_nodes(
+    # Requirement: use server image to start; do NOT docker pull at runtime.
+    if pull_docker_image:
+        logger.warning("Ignoring pull_docker_image=True: v2 enforces server-image startup (no runtime docker pull)")
+
+    launch = launch_remote_nodes_asyncssh(
         ip_addresses,
         simulation_config.nodes_per_host,
-        config_file,
-        pull_docker_image=pull_docker_image,
+        str(config_file.path),
+        ssh_key_path=ssh_key_path,
     )
+    nodes = launch.nodes
+    if launch.failed_hosts:
+        logger.warning(f"Some hosts failed during launch: {len(launch.failed_hosts)}")
     
     if len(nodes) < simulation_config.target_nodes:
         raise Exception(f"Not all nodes started: {len(nodes)}/{simulation_config.target_nodes}")
@@ -140,7 +155,7 @@ def run_simulation(
     
     # 6. Collect results
     logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
-    collect_logs(nodes, log_path)
+    collect_logs_asyncssh(nodes, log_path, ssh_key_path=ssh_key_path)
     logger.success(f"日志收集完毕，路径 {os.path.abspath(log_path)}")
     
     return nodes
@@ -171,6 +186,7 @@ def cmd_run(args):
             ip_addresses=instances.ip_addresses,
             nodes_per_host=args.nodes_per_host,
             pull_docker_image=not args.skip_pull,
+            ssh_key_path=adapter.deployer.config.ssh_private_key_path,
         )
         
     finally:
@@ -258,11 +274,19 @@ def cmd_test(args):
     else:
         raise ValueError("必须提供 --instances-file 或 --state")
     
+    # Determine ssh key path (if recovering from state, adapter is available)
+    ssh_key_path: Optional[str] = None
+    if args.state:
+        adapter = DeployerAdapter(state_path=args.state)
+        instances = adapter.recover()
+        ssh_key_path = getattr(adapter.deployer.config, "ssh_private_key_path", None)
+    
     # Run simulation
     run_simulation(
         ip_addresses=ip_addresses,
         nodes_per_host=args.nodes_per_host,
         pull_docker_image=not args.skip_pull,
+        ssh_key_path=ssh_key_path,
     )
 
 
@@ -320,11 +344,22 @@ def cmd_stop_nodes(args):
     else:
         raise ValueError("必须提供 --instances-file 或 --state")
     
+    # Avoid spawning ssh processes; use asyncssh.
+    # Determine ssh key path for cleanup commands
+    ssh_key_path: Optional[str] = None
+    if args.state:
+        adapter = DeployerAdapter(state_path=args.state)
+        try:
+            adapter.recover()
+        except Exception:
+            pass
+        ssh_key_path = getattr(adapter.deployer.config, "ssh_private_key_path", None)
+
     if args.destroy:
-        destory_remote_nodes(ip_addresses)
+        destroy_remote_nodes_asyncssh(ip_addresses, ssh_key_path=ssh_key_path)
         logger.success("所有节点已销毁")
     else:
-        stop_remote_nodes(ip_addresses)
+        stop_remote_nodes_asyncssh(ip_addresses, ssh_key_path=ssh_key_path)
         logger.success("所有节点已停止")
 
 

@@ -39,7 +39,7 @@ def check_nodes_synced(executor: ThreadPoolExecutor, nodes: List[RemoteNode]):
     if len(rare_blocks_info) > 0:
         logger.debug("出现次数不超过5的区块及其节点:")
         for (block_hash, cnt, node_ids) in rare_blocks_info:
-            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {",".join(node_ids)}")
+            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {', '.join(node_ids)}")
     
     most_common = Counter(best_blocks).most_common(1)
     if not most_common:
@@ -76,7 +76,7 @@ def init_tx_gen(nodes: List[RemoteNode], txgen_account_count:int, max_workers: i
     else:
         logger.success(f"全部节点设置交易生成成功")
 
-def _stop_node_and_collect_log(node: RemoteNode, *, counter1: AtomicCounter, counter2: AtomicCounter, total_cnt: str, local_path: str = "./logs"):
+def _stop_node_and_collect_log(node: RemoteNode, *, counter1: AtomicCounter, counter2: AtomicCounter, total_cnt: int, local_path: str = "./logs"):
     try:
         shell_cmds.ssh(node.host, "ubuntu", docker_cmds.stop_node_and_collect_log(node.index))
         cnt1 = counter1.increment()

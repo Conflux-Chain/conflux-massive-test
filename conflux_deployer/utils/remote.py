@@ -397,6 +397,39 @@ class RemoteExecutor:
             return out
 
         return self._run_coro(runner())
+
+    def download_file(
+        self,
+        host: str,
+        remote_path: str,
+        local_path: str,
+        retry: int = 3,
+    ) -> bool:
+        """Download a single remote file via SFTP."""
+
+        async def do_get() -> bool:
+            last_exc: Optional[BaseException] = None
+            for attempt in range(retry + 1):
+                try:
+                    async with await self._connect(host) as conn:
+                        local_dir = os.path.dirname(local_path)
+                        if local_dir:
+                            os.makedirs(local_dir, exist_ok=True)
+                        async with conn.start_sftp_client() as sftp:
+                            await sftp.get(remote_path, local_path)
+                        return True
+                except Exception as e:
+                    last_exc = e
+                    if attempt < retry:
+                        await asyncio.sleep(1)
+                    else:
+                        logger.debug(f"SFTP get failed on {host}: {e}")
+                        return False
+            if last_exc:
+                logger.debug(f"SFTP get failed on {host}: {last_exc}")
+            return False
+
+        return bool(self._run_coro(do_get()))
     
     def copy_content(
         self,

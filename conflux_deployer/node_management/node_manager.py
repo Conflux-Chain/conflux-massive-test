@@ -1,14 +1,31 @@
-"""Node Manager"""
+"""Node Manager
+
+NOTE: This module is a legacy/simple node manager used by some tests and scripts.
+The main production node management lives in conflux_deployer/node_management/manager.py.
+
+This implementation now mirrors the remote_simulation startup logic used by remote_simulate.py:
+- generate a config file via remote_simulation.config_builder
+- copy it to each host as ~/config.toml
+- (optionally) pull docker image
+- destroy any existing nodes
+- docker run nodes and wait for ready
+"""
 
 import time
 import pickle
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
+
 from conflux_deployer.configs.config_manager import ConfigManager
 from conflux_deployer.server_deployment.server_deployer import ServerInstance
+
+from remote_simulation.config_builder import ConfluxOptions, SimulateOptions, generate_config_file
+from remote_simulation.launch_conflux_node import launch_remote_nodes, stop_remote_nodes, destory_remote_nodes
+from remote_simulation.port_allocation import remote_rpc_port
+from remote_simulation.remote_node import RemoteNode
 
 
 @dataclass
@@ -94,48 +111,138 @@ class NodeManager:
         logger.info(f"Collected information for {len(node_info_list)} nodes on instance {instance.instance_id}")
         return node_info_list
     
-    def start_all_nodes(self):
-        """Start all Conflux nodes"""
+    @staticmethod
+    def _safe_conflux_options_from_dict(node_cfg: Dict[str, Any]) -> ConfluxOptions:
+        allowed = set(ConfluxOptions.__annotations__.keys())
+        filtered = {k: v for k, v in (node_cfg or {}).items() if k in allowed}
+        return ConfluxOptions(**filtered)
+
+    def _build_remote_simulation_config(self) -> Tuple[SimulateOptions, ConfluxOptions]:
+        conflux_cfg = self.config_manager.get_conflux_config() or {}
+        node_cfg = conflux_cfg.get("node_config") or {}
+
+        # Best-effort mapping from config.json structure.
+        conflux_opts = self._safe_conflux_options_from_dict(node_cfg)
+
+        total_nodes = len(self.nodes)
+        if total_nodes <= 0:
+            # Fall back to counts from instance_nodes map
+            total_nodes = sum(len(v) for v in self.instance_nodes.values())
+
+        # Derive target_tps if present in test configs
+        target_tps = 1000
+        try:
+            tps_cfg = self.config_manager.get_test_config("tps")
+            if isinstance(tps_cfg, dict) and tps_cfg.get("tx_rate"):
+                target_tps = int(tps_cfg["tx_rate"])
+        except Exception:
+            pass
+
+        sim_opts = SimulateOptions(
+            target_tps=target_tps,
+            target_nodes=max(1, int(total_nodes)),
+            nodes_per_host=1,
+            storage_memory_gb=int(conflux_cfg.get("storage_memory_gb", 2)),
+        )
+
+        return sim_opts, conflux_opts
+
+    def start_all_nodes(self, *, pull_docker_image: bool = True):
+        """Start all Conflux nodes on all instances using remote_simulation logic."""
         logger.info(f"Starting all {len(self.nodes)} Conflux nodes")
-        
-        # TODO: Implement node startup logic
-        # For now, just simulate the process
-        for node_id, node in self.nodes.items():
-            node.status = "starting"
+
+        if not self.instance_nodes:
+            logger.warning("No instance->nodes mapping found. Did you call collect_node_info()? Skipping.")
+            return
+
+        # Generate config once (remote_simulation uses per-node port mapping at runtime).
+        sim_opts, conflux_opts = self._build_remote_simulation_config()
+        config_file = generate_config_file(sim_opts, conflux_opts)
+        logger.info(f"Generated config file {config_file.path}")
+
+        # Group hosts by nodes_per_host (remote_simulation launcher assumes uniform nodes_per_host).
+        hosts_by_nph: Dict[int, List[str]] = {}
+        for instance_id, node_ids in self.instance_nodes.items():
+            if not node_ids:
+                continue
+            # Derive host ip from any node
+            any_node = self.nodes.get(node_ids[0])
+            if not any_node:
+                continue
+            nph = len(node_ids)
+            hosts_by_nph.setdefault(nph, []).append(any_node.ip_address)
+
+            # Mark nodes as starting
+            for node_id in node_ids:
+                if node_id in self.nodes:
+                    self.nodes[node_id].status = "starting"
+                    self.nodes[node_id].last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        started_nodes: List[RemoteNode] = []
+        for nph, ips in hosts_by_nph.items():
+            started_nodes.extend(
+                launch_remote_nodes(
+                    ips,
+                    nph,
+                    config_file,
+                    pull_docker_image=pull_docker_image,
+                )
+            )
+
+        # Update statuses based on started nodes
+        started_set = {(n.host, n.index) for n in started_nodes}
+        for node in self.nodes.values():
+            # node_id format: node-<instance_id>-<i>
+            try:
+                index = int(node.node_id.rsplit("-", 1)[-1])
+            except Exception:
+                continue
+            if (node.ip_address, index) in started_set:
+                node.status = "running"
+            else:
+                node.status = "failed"
             node.last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"Starting node {node_id}")
-        
-        # Save state
+
         self._save_state()
     
     def wait_for_nodes_ready(self, timeout: int = 300):
-        """Wait for all nodes to be ready"""
+        """Wait for all nodes to be ready (NormalSyncPhase) via remote RPC."""
         logger.info("Waiting for all nodes to be ready")
-        
+
         start_time = time.time()
-        while time.time() - start_time < timeout:
-            # TODO: Implement node readiness check
-            # For now, just simulate the process
-            all_ready = True
-            for node_id, node in self.nodes.items():
-                if node.status != "running":
-                    node.status = "running"
-                    node.last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
-                    logger.info(f"Node {node_id} is now running")
-                
-                if node.status != "running":
-                    all_ready = False
-            
-            if all_ready:
-                logger.info("All nodes are ready")
-                # Save state
-                self._save_state()
-                return
-            
-            time.sleep(5)
-        
-        logger.error(f"Timeout waiting for nodes to be ready after {timeout} seconds")
-        raise TimeoutError(f"Timeout waiting for nodes to be ready after {timeout} seconds")
+        pending: Dict[str, RemoteNode] = {}
+        for node in self.nodes.values():
+            try:
+                index = int(node.node_id.rsplit("-", 1)[-1])
+            except Exception:
+                continue
+            pending[node.node_id] = RemoteNode(host=node.ip_address, index=index)
+
+        while pending and (time.time() - start_time) < timeout:
+            done: List[str] = []
+            for node_id, rn in pending.items():
+                if rn.wait_for_ready():
+                    done.append(node_id)
+            for node_id in done:
+                if node_id in self.nodes:
+                    self.nodes[node_id].status = "running"
+                    self.nodes[node_id].last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
+                pending.pop(node_id, None)
+
+            if pending:
+                time.sleep(5)
+
+        if pending:
+            logger.error(f"Timeout waiting for nodes to be ready after {timeout} seconds")
+            for node_id in pending:
+                if node_id in self.nodes:
+                    self.nodes[node_id].status = "failed"
+                    self.nodes[node_id].last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._save_state()
+            raise TimeoutError(f"Timeout waiting for nodes to be ready after {timeout} seconds")
+
+        logger.info("All nodes are ready")
+        self._save_state()
     
     def get_node(self, node_id: str) -> Optional[NodeInfo]:
         """Get node by ID"""
@@ -170,15 +277,47 @@ class NodeManager:
     def stop_all_nodes(self):
         """Stop all Conflux nodes"""
         logger.info(f"Stopping all {len(self.nodes)} Conflux nodes")
-        
-        # TODO: Implement node stop logic
-        # For now, just simulate the process
-        for node_id, node in self.nodes.items():
+
+        if not self.instance_nodes:
+            logger.warning("No instances known; nothing to stop")
+            return
+
+        ips: List[str] = []
+        for instance_id, node_ids in self.instance_nodes.items():
+            if not node_ids:
+                continue
+            any_node = self.nodes.get(node_ids[0])
+            if any_node:
+                ips.append(any_node.ip_address)
+
+        stop_remote_nodes(ips)
+
+        for node in self.nodes.values():
             node.status = "stopped"
             node.last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"Stopped node {node_id}")
-        
-        # Save state
+
+        self._save_state()
+
+    def destroy_all_nodes(self):
+        """Destroy all Conflux nodes (docker rm -f + cleanup logs) on all instances."""
+        if not self.instance_nodes:
+            logger.warning("No instances known; nothing to destroy")
+            return
+
+        ips: List[str] = []
+        for instance_id, node_ids in self.instance_nodes.items():
+            if not node_ids:
+                continue
+            any_node = self.nodes.get(node_ids[0])
+            if any_node:
+                ips.append(any_node.ip_address)
+
+        destory_remote_nodes(ips)
+
+        for node in self.nodes.values():
+            node.status = "stopped"
+            node.last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
+
         self._save_state()
     
     def cleanup_nodes(self, instance_ids: List[str]):
