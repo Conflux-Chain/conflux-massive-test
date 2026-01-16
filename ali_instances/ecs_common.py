@@ -2,17 +2,18 @@ import asyncio
 import ipaddress
 import json
 import os
+import socket
 import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, Sequence
-
-import asyncssh
 from alibabacloud_ecs20140526.client import Client as EcsClient
+import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
 from alibabacloud_tea_openapi.models import Config as AliyunConfig
 from dotenv import load_dotenv
 from loguru import logger
+from utils.wait_until import wait_until
 
 DEFAULT_ENDPOINT = "cloudcontrol.aliyuncs.com"
 
@@ -91,21 +92,14 @@ def wait_instance_status(
 	poll_interval: int,
 	timeout: int,
 ) -> str:
-	start_time = time.time()
-	while True:
-		request = ecs_models.DescribeInstancesRequest(
-			region_id=region_id,
-			instance_ids=json.dumps([instance_id]),
-		)
-		response = client.describe_instances(request)
-		instances = response.body.instances.instance if response.body and response.body.instances else []
-		if instances:
-			status = instances[0].status
-			if status in desired_statuses:
-				return status
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"instance {instance_id} not in {desired_statuses} after {timeout}s")
-		time.sleep(poll_interval)
+	status_holder: dict[str, Optional[str]] = {"status": None}
+
+	def has_status() -> bool:
+		status_holder["status"] = get_instance_status(client, region_id, instance_id)
+		return status_holder["status"] in desired_statuses
+
+	wait_until(has_status, timeout=timeout, retry_interval=poll_interval)
+	return status_holder["status"] or ""
 
 
 def get_instance_public_ip(client: EcsClient, region_id: str, instance_id: str) -> Optional[str]:
@@ -121,24 +115,27 @@ def get_instance_public_ip(client: EcsClient, region_id: str, instance_id: str) 
 	return public_ips[0] if public_ips else None
 
 
+def get_instance_status(client: EcsClient, region_id: str, instance_id: str) -> Optional[str]:
+	request = ecs_models.DescribeInstancesRequest(
+		region_id=region_id,
+		instance_ids=json.dumps([instance_id]),
+	)
+	response = client.describe_instances(request)
+	instances = response.body.instances.instance if response.body and response.body.instances else []
+	return instances[0].status if instances else None
+
+
 def wait_instance_running(client: EcsClient, region_id: str, instance_id: str, poll_interval: int, timeout: int) -> str:
-	start_time = time.time()
-	while True:
-		request = ecs_models.DescribeInstancesRequest(
-			region_id=region_id,
-			instance_ids=json.dumps([instance_id]),
-		)
-		response = client.describe_instances(request)
-		instances = response.body.instances.instance if response.body and response.body.instances else []
-		if instances:
-			status = instances[0].status
-			public_ip = get_instance_public_ip(client, region_id, instance_id)
-			logger.info(f"instance {instance_id} status: {status}, public_ip: {public_ip}")
-			if status == "Running" and public_ip:
-				return public_ip
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"instance {instance_id} not ready after {timeout}s")
-		time.sleep(poll_interval)
+	public_ip_holder: dict[str, Optional[str]] = {"ip": None}
+
+	def is_ready() -> bool:
+		status = get_instance_status(client, region_id, instance_id)
+		public_ip_holder["ip"] = get_instance_public_ip(client, region_id, instance_id)
+		logger.info(f"instance {instance_id} status: {status}, public_ip: {public_ip_holder['ip']}")
+		return status == "Running" and bool(public_ip_holder["ip"])
+
+	wait_until(is_ready, timeout=timeout, retry_interval=poll_interval)
+	return public_ip_holder["ip"] or ""
 
 
 async def wait_for_ssh_ready(
@@ -148,23 +145,27 @@ async def wait_for_ssh_ready(
 	timeout: int,
 	interval: int = 3,
 ) -> None:
-	start_time = time.time()
+	await wait_for_tcp_port_open(host, 22, timeout=timeout, interval=interval)
 	key_path = str(Path(private_key_path).expanduser())
-	while True:
-		try:
-			conn = await asyncssh.connect(
+	deadline = time.time() + timeout
+	while time.time() < deadline:
+		results = await asyncio.gather(
+			asyncssh.connect(
 				host,
 				username=username,
 				client_keys=[key_path],
 				known_hosts=None,
-			)
-			conn.close()
-			await conn.wait_closed()
-			return
-		except (OSError, asyncssh.Error):
-			if time.time() - start_time > timeout:
-				raise TimeoutError(f"SSH not ready for {host} after {timeout}s")
+			),
+			return_exceptions=True,
+		)
+		conn = results[0]
+		if isinstance(conn, Exception):
 			await asyncio.sleep(interval)
+			continue
+		conn.close()
+		await conn.wait_closed()
+		return
+	raise TimeoutError(f"SSH not ready for {host} after {timeout}s")
 
 
 def start_instance(client: EcsClient, instance_id: str) -> None:
@@ -188,26 +189,10 @@ def allocate_public_ip(
 	poll_interval: int = 3,
 	timeout: int = 120,
 ) -> Optional[str]:
-	start_time = time.time()
-	while True:
-		try:
-			request = ecs_models.AllocatePublicIpAddressRequest(instance_id=instance_id)
-			response = client.allocate_public_ip_address(request)
-			return response.body.ip_address if response.body else None
-		except Exception as exc:
-			if "IncorrectInstanceStatus" not in str(exc):
-				raise
-			if time.time() - start_time > timeout:
-				raise
-			wait_instance_status(
-				client,
-				region_id,
-				instance_id,
-				["Running", "Stopped"],
-				poll_interval,
-				timeout,
-			)
-			time.sleep(poll_interval)
+	wait_instance_status(client, region_id, instance_id, ["Running", "Stopped"], poll_interval, timeout)
+	request = ecs_models.AllocatePublicIpAddressRequest(instance_id=instance_id)
+	response = client.allocate_public_ip_address(request)
+	return response.body.ip_address if response.body else None
 
 
 def delete_instance(
@@ -217,43 +202,26 @@ def delete_instance(
 	poll_interval: int = 5,
 	timeout: int = 300,
 ) -> None:
-	request = ecs_models.StopInstanceRequest(instance_id=instance_id, force_stop=True, stopped_mode="StopCharging")
-	try:
+	status = get_instance_status(client, region_id, instance_id)
+	if not status:
+		return
+	if status != "Stopped":
+		request = ecs_models.StopInstanceRequest(instance_id=instance_id, force_stop=True, stopped_mode="StopCharging")
 		client.stop_instance(request)
-	except Exception as exc:
-		if "IncorrectInstanceStatus" not in str(exc):
-			pass
-		else:
-			wait_instance_status(client, region_id, instance_id, ["Running", "Stopped"], poll_interval, timeout)
-			try:
-				client.stop_instance(request)
-			except Exception:
-				pass
+		wait_instance_status(client, region_id, instance_id, ["Stopped"], poll_interval, timeout)
 	delete_request = ecs_models.DeleteInstanceRequest(instance_id=instance_id, force=True, force_stop=True)
-	for _ in range(5):
-		try:
-			client.delete_instance(delete_request)
-			return
-		except Exception as exc:
-			message = str(exc)
-			if "IncorrectInstanceStatus" not in message and "InvalidOperation.Conflict" not in message:
-				raise
-			wait_instance_status(client, region_id, instance_id, ["Running", "Stopped"], poll_interval, timeout)
-			time.sleep(poll_interval)
+	client.delete_instance(delete_request)
 
 
 def wait_vpc_available(client: EcsClient, region_id: str, vpc_id: str, timeout: int = 120) -> None:
-	start_time = time.time()
-	while True:
+	def is_available() -> bool:
 		request = ecs_models.DescribeVpcsRequest(region_id=region_id, vpc_id=vpc_id)
 		response = client.describe_vpcs(request)
 		vpcs = response.body.vpcs.vpc if response.body and response.body.vpcs else []
 		status = vpcs[0].status if vpcs else None
-		if status == "Available":
-			return
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"VPC {vpc_id} not available after {timeout}s")
-		time.sleep(3)
+		return status == "Available"
+
+	wait_until(is_available, timeout=timeout, retry_interval=3)
 
 
 def ensure_vpc(client: EcsClient, region_id: str, vpc_name: str, cidr_block: str) -> str:
@@ -273,17 +241,14 @@ def ensure_vpc(client: EcsClient, region_id: str, vpc_name: str, cidr_block: str
 
 
 def wait_vswitch_available(client: EcsClient, region_id: str, vswitch_id: str, timeout: int = 120) -> None:
-	start_time = time.time()
-	while True:
+	def is_available() -> bool:
 		request = ecs_models.DescribeVSwitchesRequest(region_id=region_id, v_switch_id=vswitch_id)
 		response = client.describe_vswitches(request)
 		vswitches = response.body.v_switches.v_switch if response.body and response.body.v_switches else []
 		status = vswitches[0].status if vswitches else None
-		if status == "Available":
-			return
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"VSwitch {vswitch_id} not available after {timeout}s")
-		time.sleep(3)
+		return status == "Available"
+
+	wait_until(is_available, timeout=timeout, retry_interval=3)
 
 
 def pick_available_vswitch_cidr(existing_cidrs: list[str], vpc_cidr: str) -> str:
@@ -302,6 +267,9 @@ def ensure_vswitch(client: EcsClient, region_id: str, vpc_id: str, zone_id: str,
 	for vswitch in vswitches:
 		if vswitch.v_switch_name == name and vswitch.zone_id == zone_id:
 			return vswitch.v_switch_id
+	existing_cidrs = [v.cidr_block for v in vswitches if v.cidr_block]
+	if _cidr_overlaps(cidr_block, existing_cidrs):
+		cidr_block = pick_available_vswitch_cidr(existing_cidrs, vpc_cidr)
 	create_request = ecs_models.CreateVSwitchRequest(
 		region_id=region_id,
 		vpc_id=vpc_id,
@@ -309,14 +277,7 @@ def ensure_vswitch(client: EcsClient, region_id: str, vpc_id: str, zone_id: str,
 		v_switch_name=name,
 		cidr_block=cidr_block,
 	)
-	try:
-		create_response = client.create_vswitch(create_request)
-	except Exception as exc:
-		if "InvalidCidrBlock.Overlapped" not in str(exc):
-			raise
-		cidr_block = pick_available_vswitch_cidr([v.cidr_block for v in vswitches], vpc_cidr)
-		create_request.cidr_block = cidr_block
-		create_response = client.create_vswitch(create_request)
+	create_response = client.create_vswitch(create_request)
 	if not create_response.body or not create_response.body.v_switch_id:
 		raise RuntimeError("failed to create VSwitch")
 	vswitch_id = create_response.body.v_switch_id
@@ -344,17 +305,16 @@ def ensure_security_group(client: EcsClient, region_id: str, vpc_id: str, name: 
 
 
 def authorize_security_group_port(client: EcsClient, region_id: str, security_group_id: str, port: int) -> None:
-	try:
-		request = ecs_models.AuthorizeSecurityGroupRequest(
-			region_id=region_id,
-			security_group_id=security_group_id,
-			ip_protocol="tcp",
-			port_range=f"{port}/{port}",
-			source_cidr_ip="0.0.0.0/0",
-		)
-		client.authorize_security_group(request)
-	except Exception as exc:
-		logger.warning(f"authorize security group failed or rule exists: {exc}")
+	if security_group_allows_port(client, region_id, security_group_id, port):
+		return
+	request = ecs_models.AuthorizeSecurityGroupRequest(
+		region_id=region_id,
+		security_group_id=security_group_id,
+		ip_protocol="tcp",
+		port_range=f"{port}/{port}",
+		source_cidr_ip="0.0.0.0/0",
+	)
+	client.authorize_security_group(request)
 
 
 def ensure_network_resources(
@@ -380,3 +340,42 @@ def ensure_network_resources(
 	for port in open_ports:
 		authorize_security_group_port(client, region_id, selected_security_group_id, port)
 	return selected_zone_id, selected_vswitch_id, selected_security_group_id
+
+
+def security_group_allows_port(client: EcsClient, region_id: str, security_group_id: str, port: int) -> bool:
+	request = ecs_models.DescribeSecurityGroupAttributeRequest(
+		region_id=region_id,
+		security_group_id=security_group_id,
+	)
+	response = client.describe_security_group_attribute(request)
+	permissions = response.body.permissions.permission if response.body and response.body.permissions else []
+	port_range = f"{port}/{port}"
+	for perm in permissions:
+		if perm.ip_protocol != "tcp":
+			continue
+		if perm.port_range == port_range and perm.source_cidr_ip == "0.0.0.0/0":
+			return True
+	return False
+
+
+def _cidr_overlaps(cidr_block: str, existing_cidrs: Sequence[str]) -> bool:
+	if not cidr_block:
+		return True
+	new_net = ipaddress.ip_network(cidr_block)
+	for cidr in existing_cidrs:
+		if not cidr:
+			continue
+		if new_net.overlaps(ipaddress.ip_network(cidr)):
+			return True
+	return False
+
+
+async def wait_for_tcp_port_open(host: str, port: int, timeout: int, interval: int = 3) -> None:
+	deadline = time.time() + timeout
+	while time.time() < deadline:
+		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+			sock.settimeout(2)
+			if sock.connect_ex((host, port)) == 0:
+				return
+		await asyncio.sleep(interval)
+	raise TimeoutError(f"TCP port {port} not open on {host} within {timeout}s")

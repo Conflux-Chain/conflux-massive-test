@@ -24,6 +24,7 @@ from conflux.config import (
     DEFAULT_WS_PORT,
     build_single_node_conflux_config_text,
 )
+from utils.wait_until import wait_until
 
 
 DEFAULT_REGION_ID = "ap-southeast-3"
@@ -44,14 +45,12 @@ def rpc_call(url: str, method: str, params: Optional[list] = None, timeout: int 
 
 
 def wait_for_port_open(host: str, port: int, timeout: int = 180) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    def is_open() -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(2)
-            if sock.connect_ex((host, port)) == 0:
-                return
-        time.sleep(2)
-    raise TimeoutError(f"port {port} not ready on {host} within {timeout}s")
+            return sock.connect_ex((host, port)) == 0
+
+    wait_until(is_open, timeout=timeout, retry_interval=2)
 
 
 def wait_for_rpc(host: str, port: int, timeout: int = 180) -> None:
@@ -76,13 +75,14 @@ def wait_for_epoch_increase(host: str, port: int, delta: int, timeout: int = 600
     url = f"http://{host}:{port}"
     start = _parse_hex_int(rpc_call(url, "cfx_epochNumber", ["latest_mined"]).get("result"))
     target = start + delta
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    current_holder: dict[str, int] = {"value": start}
+
+    def has_advanced() -> bool:
         current = _parse_hex_int(rpc_call(url, "cfx_epochNumber", ["latest_mined"]).get("result"))
-        if current >= target:
-            return
-        time.sleep(2)
-    raise TimeoutError(f"epoch did not increase by {delta} within {timeout}s (current={current}, target={target})")
+        current_holder["value"] = current
+        return current >= target
+
+    wait_until(has_advanced, timeout=timeout, retry_interval=2)
 
 
 def check_block_production(host: str, port: int, wait_blocks: int = 5) -> None:
@@ -111,14 +111,17 @@ def send_evm_transaction(url: str, chain_id: int) -> str:
 
 
 def wait_for_evm_receipt(url: str, tx_hash: str, timeout: int = 180, interval: int = 2) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    receipt_holder: dict[str, object] = {}
+
+    def has_receipt() -> bool:
         receipt = rpc_call(url, "eth_getTransactionReceipt", [tx_hash]).get("result")
         if receipt:
-            logger.info("evm transaction receipt found")
-            return
-        time.sleep(interval)
-    raise TimeoutError(f"evm receipt not found within {timeout}s for {tx_hash}")
+            receipt_holder["receipt"] = receipt
+            return True
+        return False
+
+    wait_until(has_receipt, timeout=timeout, retry_interval=interval)
+    logger.info("evm transaction receipt found")
 
 
 def generate_test_block(url: str) -> None:

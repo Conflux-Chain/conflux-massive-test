@@ -32,7 +32,7 @@ class SingleInstanceConfig:
 	endpoint: Optional[str] = None
 	ssh_username: str = "root"
 	ssh_private_key_path: str = "./keys/chenxinghao-conflux-image-builder.pem"
-	instance_name_prefix: str = "conflux-single-node"
+	instance_name_prefix: str = "conflux-massive-test-single-instance"
 	internet_max_bandwidth_out: int = 10
 	poll_interval: int = 5
 	wait_timeout: int = 1800

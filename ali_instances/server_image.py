@@ -3,6 +3,7 @@ import asyncio
 import json
 import ipaddress
 import os
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from loguru import logger
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from alibabacloud_ecs20140526 import models as ecs_models
 from alibabacloud_tea_openapi.models import Config as AliyunConfig
+from utils.wait_until import wait_until
 
 
 DEFAULT_REGION_ID = "ap-southeast-3"
@@ -164,10 +166,6 @@ def pick_zone_and_instance_type(
 	raise RuntimeError("no in-stock instance type found")
 
 
-def is_no_stock_error(exc: Exception) -> bool:
-	return "OperationDenied.NoStock" in str(exc)
-
-
 def pick_system_disk_category(client: EcsClient, region_id: str, zone_id: str) -> Optional[str]:
 	request = ecs_models.DescribeZonesRequest(region_id=region_id)
 	response = client.describe_zones(request)
@@ -203,17 +201,14 @@ def ensure_vpc(client: EcsClient, region_id: str, vpc_name: str, cidr_block: str
 
 
 def wait_vpc_available(client: EcsClient, region_id: str, vpc_id: str, timeout: int = 120) -> None:
-	start_time = time.time()
-	while True:
+	def is_available() -> bool:
 		request = ecs_models.DescribeVpcsRequest(region_id=region_id, vpc_id=vpc_id)
 		response = client.describe_vpcs(request)
 		vpcs = response.body.vpcs.vpc if response.body and response.body.vpcs else []
 		status = vpcs[0].status if vpcs else None
-		if status == "Available":
-			return
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"VPC {vpc_id} not available after {timeout}s")
-		time.sleep(3)
+		return status == "Available"
+
+	wait_until(is_available, timeout=timeout, retry_interval=3)
 
 
 def ensure_vswitch(client: EcsClient, region_id: str, vpc_id: str, zone_id: str, name: str, cidr_block: str) -> str:
@@ -223,6 +218,9 @@ def ensure_vswitch(client: EcsClient, region_id: str, vpc_id: str, zone_id: str,
 	for vswitch in vswitches:
 		if vswitch.v_switch_name == name and vswitch.zone_id == zone_id:
 			return vswitch.v_switch_id
+	existing_cidrs = [v.cidr_block for v in vswitches if v.cidr_block]
+	if _cidr_overlaps(cidr_block, existing_cidrs):
+		cidr_block = pick_available_vswitch_cidr(existing_cidrs, DEFAULT_VPC_CIDR)
 	create_request = ecs_models.CreateVSwitchRequest(
 		region_id=region_id,
 		vpc_id=vpc_id,
@@ -230,14 +228,7 @@ def ensure_vswitch(client: EcsClient, region_id: str, vpc_id: str, zone_id: str,
 		v_switch_name=name,
 		cidr_block=cidr_block,
 	)
-	try:
-		create_response = client.create_vswitch(create_request)
-	except Exception as exc:
-		if "InvalidCidrBlock.Overlapped" not in str(exc):
-			raise
-		cidr_block = pick_available_vswitch_cidr([v.cidr_block for v in vswitches], DEFAULT_VPC_CIDR)
-		create_request.cidr_block = cidr_block
-		create_response = client.create_vswitch(create_request)
+	create_response = client.create_vswitch(create_request)
 	if not create_response.body or not create_response.body.v_switch_id:
 		raise RuntimeError("failed to create VSwitch")
 	vswitch_id = create_response.body.v_switch_id
@@ -255,17 +246,14 @@ def pick_available_vswitch_cidr(existing_cidrs: list[str], vpc_cidr: str) -> str
 
 
 def wait_vswitch_available(client: EcsClient, region_id: str, vswitch_id: str, timeout: int = 120) -> None:
-	start_time = time.time()
-	while True:
+	def is_available() -> bool:
 		request = ecs_models.DescribeVSwitchesRequest(region_id=region_id, v_switch_id=vswitch_id)
 		response = client.describe_vswitches(request)
 		vswitches = response.body.v_switches.v_switch if response.body and response.body.v_switches else []
 		status = vswitches[0].status if vswitches else None
-		if status == "Available":
-			return
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"VSwitch {vswitch_id} not available after {timeout}s")
-		time.sleep(3)
+		return status == "Available"
+
+	wait_until(is_available, timeout=timeout, retry_interval=3)
 
 
 def ensure_security_group(client: EcsClient, region_id: str, vpc_id: str, name: str) -> str:
@@ -285,7 +273,7 @@ def ensure_security_group(client: EcsClient, region_id: str, vpc_id: str, name: 
 	if not create_response.body or not create_response.body.security_group_id:
 		raise RuntimeError("failed to create security group")
 	security_group_id = create_response.body.security_group_id
-	try:
+	if not security_group_allows_port(client, region_id, security_group_id, 22):
 		authorize_request = ecs_models.AuthorizeSecurityGroupRequest(
 			region_id=region_id,
 			security_group_id=security_group_id,
@@ -294,9 +282,53 @@ def ensure_security_group(client: EcsClient, region_id: str, vpc_id: str, name: 
 			source_cidr_ip="0.0.0.0/0",
 		)
 		client.authorize_security_group(authorize_request)
-	except Exception as exc:
-		logger.warning(f"authorize security group failed or rule exists: {exc}")
 	return security_group_id
+
+
+def security_group_allows_port(client: EcsClient, region_id: str, security_group_id: str, port: int) -> bool:
+	request = ecs_models.DescribeSecurityGroupAttributeRequest(
+		region_id=region_id,
+		security_group_id=security_group_id,
+	)
+	response = client.describe_security_group_attribute(request)
+	permissions = response.body.permissions.permission if response.body and response.body.permissions else []
+	port_range = f"{port}/{port}"
+	for perm in permissions:
+		if perm.ip_protocol != "tcp":
+			continue
+		if perm.port_range == port_range and perm.source_cidr_ip == "0.0.0.0/0":
+			return True
+	return False
+
+
+def _cidr_overlaps(cidr_block: str, existing_cidrs: Sequence[str]) -> bool:
+	if not cidr_block:
+		return True
+	new_net = ipaddress.ip_network(cidr_block)
+	for cidr in existing_cidrs:
+		if not cidr:
+			continue
+		if new_net.overlaps(ipaddress.ip_network(cidr)):
+			return True
+	return False
+
+
+def vswitch_exists(client: EcsClient, region_id: str, vswitch_id: Optional[str]) -> bool:
+	if not vswitch_id:
+		return False
+	request = ecs_models.DescribeVSwitchesRequest(region_id=region_id, v_switch_id=vswitch_id)
+	response = client.describe_vswitches(request)
+	vswitches = response.body.v_switches.v_switch if response.body and response.body.v_switches else []
+	return any(v.v_switch_id == vswitch_id for v in vswitches if v.v_switch_id)
+
+
+def security_group_exists(client: EcsClient, region_id: str, security_group_id: Optional[str]) -> bool:
+	if not security_group_id:
+		return False
+	request = ecs_models.DescribeSecurityGroupsRequest(region_id=region_id, security_group_id=security_group_id)
+	response = client.describe_security_groups(request)
+	groups = response.body.security_groups.security_group if response.body and response.body.security_groups else []
+	return any(group.security_group_id == security_group_id for group in groups if group.security_group_id)
 
 
 def ensure_network_resources(client: EcsClient, config: ImageBuildConfig) -> ImageBuildConfig:
@@ -461,7 +493,7 @@ def pick_zone_and_instance_type(
 	max_memory_gb: float,
 	spot_strategy: Optional[str],
 	cpu_vendor: Optional[str],
-) -> tuple[str, str, Optional[str]]:
+) -> Optional[tuple[str, str, Optional[str]]]:
 	request = ecs_models.DescribeAvailableResourceRequest(
 		region_id=region_id,
 		destination_resource="InstanceType",
@@ -501,7 +533,7 @@ def pick_zone_and_instance_type(
 			"amd" if "amd" in (selected.physical_processor_model or "").lower() else None
 		)
 		return zone.zone_id, selected.instance_type_id, vendor
-	raise RuntimeError("no in-stock instance type found")
+	return None
 
 
 def pick_instance_type(
@@ -557,21 +589,19 @@ def find_image_across_regions(credentials: AliCredentials, target_region_id: str
 
 
 def wait_for_image_available(client: EcsClient, region_id: str, image_id: str, poll_interval: int, timeout: int) -> None:
-	start_time = time.time()
-	while True:
+	def is_available() -> bool:
 		request = ecs_models.DescribeImagesRequest(region_id=region_id, image_id=image_id)
 		response = client.describe_images(request)
 		images = response.body.images.image if response.body and response.body.images else []
-		if images:
-			status = images[0].status
-			logger.info(f"image {image_id} status: {status}")
-			if status == "Available":
-				return
-			if status in {"CreateFailed", "UnAvailable", "Deprecated"}:
-				raise RuntimeError(f"image {image_id} failed with status: {status}")
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"image {image_id} not ready after {timeout}s")
-		time.sleep(poll_interval)
+		if not images:
+			return False
+		status = images[0].status
+		logger.info(f"image {image_id} status: {status}")
+		if status in {"CreateFailed", "UnAvailable", "Deprecated"}:
+			raise RuntimeError(f"image {image_id} failed with status: {status}")
+		return status == "Available"
+
+	wait_until(is_available, timeout=timeout, retry_interval=poll_interval)
 
 
 def copy_image(credentials: AliCredentials, source: ImageSource, destination_region_id: str, destination_name: str) -> str:
@@ -594,6 +624,10 @@ def create_builder_instance(client: EcsClient, config: ImageBuildConfig) -> str:
 	system_disk_category = pick_system_disk_category(client, config.region_id, config.zone_id)
 	system_disk = ecs_models.CreateInstanceRequestSystemDisk(category=system_disk_category, size=40) if system_disk_category else None
 	instance_name = f"{config.instance_name_prefix}-{int(time.time())}"
+	if not vswitch_exists(client, config.region_id, config.v_switch_id) or not security_group_exists(
+		client, config.region_id, config.security_group_id
+	):
+		config = ensure_network_resources(client, config)
 	request = ecs_models.CreateInstanceRequest(
 		region_id=config.region_id,
 		zone_id=config.zone_id,
@@ -609,47 +643,7 @@ def create_builder_instance(client: EcsClient, config: ImageBuildConfig) -> str:
 		spot_strategy=config.spot_strategy if config.use_spot else None,
 		system_disk=system_disk,
 	)
-	try:
-		response = client.create_instance(request)
-	except Exception as exc:
-		if "InvalidVSwitchId.NotFound" not in str(exc):
-			raise
-		config = ImageBuildConfig(
-			credentials=config.credentials,
-			base_image_id=config.base_image_id,
-			instance_type=config.instance_type,
-			min_cpu_cores=config.min_cpu_cores,
-			min_memory_gb=config.min_memory_gb,
-			max_memory_gb=config.max_memory_gb,
-			cpu_vendor=config.cpu_vendor,
-			v_switch_id=None,
-			security_group_id=None,
-			conflux_git_ref=config.conflux_git_ref,
-			key_pair_name=config.key_pair_name,
-			region_id=config.region_id,
-			zone_id=config.zone_id,
-			endpoint=config.endpoint,
-			image_prefix=config.image_prefix,
-			instance_name_prefix=config.instance_name_prefix,
-			internet_max_bandwidth_out=config.internet_max_bandwidth_out,
-			ssh_username=config.ssh_username,
-			ssh_private_key_path=config.ssh_private_key_path,
-			poll_interval=config.poll_interval,
-			wait_timeout=config.wait_timeout,
-			cleanup_builder_instance=config.cleanup_builder_instance,
-			search_all_regions=config.search_all_regions,
-			use_spot=config.use_spot,
-			spot_strategy=config.spot_strategy,
-			vpc_name=config.vpc_name,
-			vswitch_name=config.vswitch_name,
-			security_group_name=config.security_group_name,
-			vpc_cidr=config.vpc_cidr,
-			vswitch_cidr=config.vswitch_cidr,
-		)
-		config = ensure_network_resources(client, config)
-		request.v_switch_id = config.v_switch_id
-		request.security_group_id = config.security_group_id
-		response = client.create_instance(request)
+	response = client.create_instance(request)
 	if not response.body or not response.body.instance_id:
 		raise RuntimeError("failed to create instance")
 	return response.body.instance_id
@@ -688,24 +682,27 @@ def get_instance_public_ip(client: EcsClient, region_id: str, instance_id: str) 
 	return public_ips[0] if public_ips else None
 
 
+def get_instance_status(client: EcsClient, region_id: str, instance_id: str) -> Optional[str]:
+	request = ecs_models.DescribeInstancesRequest(
+		region_id=region_id,
+		instance_ids=json.dumps([instance_id]),
+	)
+	response = client.describe_instances(request)
+	instances = response.body.instances.instance if response.body and response.body.instances else []
+	return instances[0].status if instances else None
+
+
 def wait_instance_running(client: EcsClient, region_id: str, instance_id: str, poll_interval: int, timeout: int) -> str:
-	start_time = time.time()
-	while True:
-		request = ecs_models.DescribeInstancesRequest(
-			region_id=region_id,
-			instance_ids=json.dumps([instance_id]),
-		)
-		response = client.describe_instances(request)
-		instances = response.body.instances.instance if response.body and response.body.instances else []
-		if instances:
-			status = instances[0].status
-			public_ip = get_instance_public_ip(client, region_id, instance_id)
-			logger.info(f"instance {instance_id} status: {status}, public_ip: {public_ip}")
-			if status == "Running" and public_ip:
-				return public_ip
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"instance {instance_id} not ready after {timeout}s")
-		time.sleep(poll_interval)
+	public_ip_holder: dict[str, Optional[str]] = {"ip": None}
+
+	def is_ready() -> bool:
+		status = get_instance_status(client, region_id, instance_id)
+		public_ip_holder["ip"] = get_instance_public_ip(client, region_id, instance_id)
+		logger.info(f"instance {instance_id} status: {status}, public_ip: {public_ip_holder['ip']}")
+		return status == "Running" and bool(public_ip_holder["ip"])
+
+	wait_until(is_ready, timeout=timeout, retry_interval=poll_interval)
+	return public_ip_holder["ip"] or ""
 
 
 def wait_instance_status(
@@ -716,40 +713,36 @@ def wait_instance_status(
 	poll_interval: int,
 	timeout: int,
 ) -> str:
-	start_time = time.time()
-	while True:
-		request = ecs_models.DescribeInstancesRequest(
-			region_id=region_id,
-			instance_ids=json.dumps([instance_id]),
-		)
-		response = client.describe_instances(request)
-		instances = response.body.instances.instance if response.body and response.body.instances else []
-		if instances:
-			status = instances[0].status
-			if status in desired_statuses:
-				return status
-		if time.time() - start_time > timeout:
-			raise TimeoutError(f"instance {instance_id} not in {desired_statuses} after {timeout}s")
-		time.sleep(poll_interval)
+	status_holder: dict[str, Optional[str]] = {"status": None}
+
+	def has_status() -> bool:
+		status_holder["status"] = get_instance_status(client, region_id, instance_id)
+		return status_holder["status"] in desired_statuses
+
+	wait_until(has_status, timeout=timeout, retry_interval=poll_interval)
+	return status_holder["status"] or ""
+
+
+async def wait_for_tcp_port_open(host: str, port: int, timeout: int, interval: int = 3) -> None:
+	deadline = time.time() + timeout
+	while time.time() < deadline:
+		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+			sock.settimeout(2)
+			if sock.connect_ex((host, port)) == 0:
+				return
+		await asyncio.sleep(interval)
+	raise TimeoutError(f"TCP port {port} not open on {host} within {timeout}s")
 
 
 async def prepare_instance(host: str, config: ImageBuildConfig) -> None:
 	key_path = str(Path(config.ssh_private_key_path).expanduser())
-	start_time = time.time()
-	while True:
-		try:
-			conn = await asyncssh.connect(
-				host,
-				username=config.ssh_username,
-				client_keys=[key_path],
-				known_hosts=None,
-			)
-			break
-		except (OSError, asyncssh.Error):
-			if time.time() - start_time > config.wait_timeout:
-				raise
-			await asyncio.sleep(3)
-	async with conn:
+	await wait_for_tcp_port_open(host, 22, timeout=config.wait_timeout, interval=3)
+	async with asyncssh.connect(
+		host,
+		username=config.ssh_username,
+		client_keys=[key_path],
+		known_hosts=None,
+	) as conn:
 		commands = [
 			"sudo apt-get update -y",
 			(
@@ -831,13 +824,7 @@ def delete_instance(client: EcsClient, region_id: str, instance_id: str) -> None
 			timeout=180,
 		)
 	request = ecs_models.DeleteInstanceRequest(instance_id=instance_id, force=True, force_stop=True)
-	try:
-		client.delete_instance(request)
-	except Exception as exc:
-		if "IncorrectInstanceStatus" not in str(exc):
-			raise
-		time.sleep(5)
-		client.delete_instance(request)
+	client.delete_instance(request)
 
 
 def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
@@ -908,26 +895,39 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 		)
 		return f"dry-run:{image_name}"
 
-	try:
-		zone_id, selected_type, vendor = pick_zone_and_instance_type(
+	memory_ranges = [(2.0, 2.0), (4.0, 4.0)]
+	spot_strategy = config.spot_strategy if config.use_spot else None
+	selection = None
+	for min_mem, max_mem in memory_ranges:
+		selection = pick_zone_and_instance_type(
 			client,
 			config.region_id,
 			config.min_cpu_cores,
-			2.0,
-			2.0,
-			config.spot_strategy if config.use_spot else None,
+			min_mem,
+			max_mem,
+			spot_strategy,
 			config.cpu_vendor,
 		)
-	except RuntimeError:
-		zone_id, selected_type, vendor = pick_zone_and_instance_type(
-			client,
-			config.region_id,
-			config.min_cpu_cores,
-			4.0,
-			4.0,
-			config.spot_strategy if config.use_spot else None,
-			config.cpu_vendor,
-		)
+		if selection:
+			break
+	if not selection and config.use_spot:
+		spot_strategy = None
+		for min_mem, max_mem in memory_ranges:
+			selection = pick_zone_and_instance_type(
+				client,
+				config.region_id,
+				config.min_cpu_cores,
+				min_mem,
+				max_mem,
+				spot_strategy,
+				config.cpu_vendor,
+			)
+			if selection:
+				break
+	if not selection:
+		raise RuntimeError("no in-stock instance type found")
+	zone_id, selected_type, vendor = selection
+	use_spot = spot_strategy is not None
 	config = ImageBuildConfig(
 		credentials=config.credentials,
 		base_image_id=config.base_image_id,
@@ -952,7 +952,7 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 		wait_timeout=config.wait_timeout,
 		cleanup_builder_instance=config.cleanup_builder_instance,
 		search_all_regions=config.search_all_regions,
-		use_spot=config.use_spot,
+		use_spot=use_spot,
 		spot_strategy=config.spot_strategy,
 		vpc_name=config.vpc_name,
 		vswitch_name=config.vswitch_name,
@@ -963,51 +963,10 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 	config = ensure_network_resources(client, config)
 	ensure_key_pair(client, config.region_id, config.key_pair_name, config.ssh_private_key_path)
 
+	instance_id = ""
 	try:
 		instance_id = create_builder_instance(client, config)
-	except Exception as exc:
-		if not (config.use_spot and is_no_stock_error(exc)):
-			raise
-		zone_id, selected_type = pick_zone_and_instance_type(
-			client,
-			config.region_id,
-			config.min_cpu_cores,
-			config.min_memory_gb,
-			None,
-		)
-		config = ImageBuildConfig(
-			credentials=config.credentials,
-			base_image_id=config.base_image_id,
-			instance_type=selected_type,
-			min_cpu_cores=config.min_cpu_cores,
-			min_memory_gb=config.min_memory_gb,
-			v_switch_id=config.v_switch_id,
-			security_group_id=config.security_group_id,
-			conflux_git_ref=config.conflux_git_ref,
-			key_pair_name=config.key_pair_name,
-			region_id=config.region_id,
-			zone_id=zone_id,
-			endpoint=config.endpoint,
-			image_prefix=config.image_prefix,
-			instance_name_prefix=config.instance_name_prefix,
-			internet_max_bandwidth_out=config.internet_max_bandwidth_out,
-			ssh_username=config.ssh_username,
-			ssh_private_key_path=config.ssh_private_key_path,
-			poll_interval=config.poll_interval,
-			wait_timeout=config.wait_timeout,
-			cleanup_builder_instance=config.cleanup_builder_instance,
-			search_all_regions=config.search_all_regions,
-			use_spot=False,
-			spot_strategy=config.spot_strategy,
-			vpc_name=config.vpc_name,
-			vswitch_name=config.vswitch_name,
-			security_group_name=config.security_group_name,
-			vpc_cidr=config.vpc_cidr,
-			vswitch_cidr=config.vswitch_cidr,
-		)
-		instance_id = create_builder_instance(client, config)
-	logger.info(f"builder instance created: {instance_id}")
-	try:
+		logger.info(f"builder instance created: {instance_id}")
 		status = wait_instance_status(
 			client,
 			config.region_id,
@@ -1047,10 +1006,8 @@ def create_server_image(config: ImageBuildConfig, dry_run: bool = False) -> str:
 			instance_id=instance_id,
 			image_name=image_name,
 		)
-		try:
-			create_response = client.create_image(create_request)
-		except Exception:
-			logger.warning("image creation failed with StopCharging; retrying with normal stop")
+		create_response = client.create_image(create_request)
+		if not create_response.body or not create_response.body.image_id:
 			stop_instance(client, instance_id, None)
 			wait_instance_status(
 				client,
