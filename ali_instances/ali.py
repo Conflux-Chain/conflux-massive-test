@@ -19,7 +19,7 @@ from alibabacloud_tea_openapi.models import Config as AliyunConfig
 from dotenv import load_dotenv
 from loguru import logger
 
-from conflux.config import (ConfluxNodeConfig, DEFAULT_CHAIN_ID, DEFAULT_EVM_CHAIN_ID, DEFAULT_EVM_RPC_PORT, DEFAULT_EVM_WS_PORT, DEFAULT_RPC_PORT, DEFAULT_WS_PORT, build_single_node_conflux_config_text)
+from remote_simulation.config_builder import SingleNodeConfig, single_node_config_text
 from utils.wait_until import wait_until
 
 DEFAULT_REGION = "ap-southeast-3"
@@ -374,7 +374,7 @@ DEFAULT_SVC = "conflux-docker"
 def _pos_src() -> Path: return Path(__file__).resolve().parents[1] / "ref" / "zero-gravity-swap" / "pos_config"
 
 
-def make_docker_prepare(node: ConfluxNodeConfig, ctx: Path, tag: str, repo: str, branch: str, svc: str):
+def make_docker_prepare(node: SingleNodeConfig, ctx: Path, tag: str, repo: str, branch: str, svc: str):
     async def prepare(host: str, cfg: EcsConfig) -> None:
         key = str(Path(cfg.ssh_private_key_path).expanduser())
         await _wait_tcp(host, 22, cfg.wait_timeout, 3)
@@ -388,17 +388,17 @@ def make_docker_prepare(node: ConfluxNodeConfig, ctx: Path, tag: str, repo: str,
             await run("sudo apt-get update -y")
             await run("sudo apt-get install -y docker.io ca-certificates curl tar")
             await run("sudo systemctl enable --now docker")
-            for d in [node.remote_config_dir, node.remote_data_dir, node.remote_log_dir, node.remote_pos_config_dir]: await run(f"sudo mkdir -p {d}")
-            cfgtxt = build_single_node_conflux_config_text(node)
+            for d in ["/opt/conflux/config", node.data_dir, "/opt/conflux/logs", "/opt/conflux/pos_config"]: await run(f"sudo mkdir -p {d}")
+            cfgtxt = single_node_config_text(node)
             local = Path(f"/tmp/cfx_{int(time.time())}.toml"); local.write_text(cfgtxt)
-            await asyncssh.scp(str(local), (conn, f"{node.remote_config_dir}/conflux_0.toml")); local.unlink(missing_ok=True)
+            await asyncssh.scp(str(local), (conn, "/opt/conflux/config/conflux_0.toml")); local.unlink(missing_ok=True)
             pos = _pos_src()
             if not pos.exists(): raise FileNotFoundError(f"pos_config not found: {pos}")
             pa = Path(f"/tmp/pos_{int(time.time())}.tar.gz")
             with tarfile.open(pa, "w:gz") as t: t.add(pos, arcname="pos_config")
             await asyncssh.scp(str(pa), (conn, f"/tmp/{pa.name}")); pa.unlink(missing_ok=True)
-            await run(f"sudo tar -xzf /tmp/{pa.name} -C {node.remote_pos_config_dir} --strip-components=1")
-            await run(f"sudo mkdir -p {node.remote_pos_config_dir}/log")
+            await run(f"sudo tar -xzf /tmp/{pa.name} -C /opt/conflux/pos_config --strip-components=1")
+            await run("sudo mkdir -p /opt/conflux/pos_config/log")
             if not ctx.exists(): raise FileNotFoundError(f"docker ctx not found: {ctx}")
             ca = Path(f"/tmp/dctx_{int(time.time())}.tar.gz")
             with tarfile.open(ca, "w:gz") as t: t.add(ctx, arcname=".")
@@ -407,7 +407,7 @@ def make_docker_prepare(node: ConfluxNodeConfig, ctx: Path, tag: str, repo: str,
             await run(f"sudo tar -xzf /tmp/{ca.name} -C /opt/conflux/docker")
             try: await run(f"sudo bash -lc 'set -o pipefail; DOCKER_BUILDKIT=0 docker build --build-arg CACHEBUST={int(time.time())} --build-arg BRANCH={branch} --build-arg REPO_URL={repo} -t {tag} /opt/conflux/docker 2>&1 | tee /tmp/docker.log'")
             except Exception: await run("sudo tail -n 200 /tmp/docker.log || true", check=False); raise
-            script = f"#!/usr/bin/env bash\nset -euo pipefail\ndocker rm -f {svc} >/dev/null 2>&1 || true\nexec docker run --rm --name {svc} --net=host --privileged --ulimit nofile=65535:65535 --ulimit nproc=65535:65535 --ulimit core=-1 -v {node.remote_config_dir}:{node.remote_config_dir} -v {node.remote_data_dir}:{node.remote_data_dir} -v {node.remote_log_dir}:{node.remote_log_dir} -v {node.remote_pos_config_dir}:{node.remote_pos_config_dir} -v {node.remote_pos_config_dir}:/app/pos_config -w {node.remote_log_dir} {tag} /root/conflux --config {node.remote_config_dir}/conflux_0.toml"
+            script = f"#!/usr/bin/env bash\nset -euo pipefail\ndocker rm -f {svc} >/dev/null 2>&1 || true\nexec docker run --rm --name {svc} --net=host --privileged --ulimit nofile=65535:65535 --ulimit nproc=65535:65535 --ulimit core=-1 -v /opt/conflux/config:/opt/conflux/config -v {node.data_dir}:{node.data_dir} -v /opt/conflux/logs:/opt/conflux/logs -v /opt/conflux/pos_config:/opt/conflux/pos_config -v /opt/conflux/pos_config:/app/pos_config -w /opt/conflux/logs {tag} /root/conflux --config /opt/conflux/config/conflux_0.toml"
             unit = f"[Unit]\nDescription=Conflux ({svc})\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=simple\nExecStart=/usr/local/bin/{svc}-run.sh\nExecStop=/usr/bin/docker stop {svc}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target"
             await run(f"sudo bash -lc 'cat > /usr/local/bin/{svc}-run.sh << \"EOF\"\n{script}\nEOF\nchmod +x /usr/local/bin/{svc}-run.sh'")
             await run(f"sudo bash -lc 'cat > /etc/systemd/system/{svc}.service << \"EOF\"\n{unit}\nEOF\nsystemctl daemon-reload; systemctl enable {svc}.service'")
@@ -474,14 +474,14 @@ def main() -> None:
 def main_docker() -> None:
     p = argparse.ArgumentParser(description="Create Alibaba Cloud image with Docker Conflux"); add_args(p)
     p.set_defaults(image_prefix="conflux-docker")
-    p.add_argument("--rpc-port", type=int, default=DEFAULT_RPC_PORT); p.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT)
-    p.add_argument("--evm-rpc-port", type=int, default=DEFAULT_EVM_RPC_PORT); p.add_argument("--evm-ws-port", type=int, default=DEFAULT_EVM_WS_PORT)
-    p.add_argument("--chain-id", type=int, default=DEFAULT_CHAIN_ID); p.add_argument("--evm-chain-id", type=int, default=DEFAULT_EVM_CHAIN_ID)
+    p.add_argument("--rpc-port", type=int, default=12537); p.add_argument("--ws-port", type=int, default=12538)
+    p.add_argument("--evm-rpc-port", type=int, default=12539); p.add_argument("--evm-ws-port", type=int, default=12540)
+    p.add_argument("--chain-id", type=int, default=1024); p.add_argument("--evm-chain-id", type=int, default=1025)
     p.add_argument("--mining-author", default=None); p.add_argument("--docker-context", default=str(DEFAULT_DOCKER_CTX))
     p.add_argument("--docker-tag", default=DEFAULT_DOCKER_TAG); p.add_argument("--docker-repo-url", default=DEFAULT_DOCKER_REPO)
     p.add_argument("--docker-branch", default=DEFAULT_DOCKER_BRANCH); p.add_argument("--service-name", default=DEFAULT_SVC)
     a = p.parse_args()
-    node = ConfluxNodeConfig(rpc_port=a.rpc_port, ws_port=a.ws_port, evm_rpc_port=a.evm_rpc_port, evm_ws_port=a.evm_ws_port, chain_id=a.chain_id, evm_chain_id=a.evm_chain_id, mining_author=a.mining_author)
+    node = SingleNodeConfig(rpc_port=a.rpc_port, ws_port=a.ws_port, evm_rpc_port=a.evm_rpc_port, evm_ws_port=a.evm_ws_port, chain_id=a.chain_id, evm_chain_id=a.evm_chain_id, mining_author=a.mining_author)
     prep = make_docker_prepare(node, Path(a.docker_context).expanduser(), a.docker_tag, a.docker_repo_url, a.docker_branch, a.service_name)
     logger.info(f"image: {create_server_image(cfg_from_args(a), dry_run=a.dry_run, prepare_fn=prep)}")
 

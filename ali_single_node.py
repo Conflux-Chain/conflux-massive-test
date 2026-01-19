@@ -12,17 +12,7 @@ from loguru import logger
 import requests
 
 from ali_instances.ali import EcsConfig, InstanceHandle, auth_port, cleanup_instance, client, load_credentials, load_endpoint, provision_instance, wait_ssh
-from conflux.config import (
-    ConfluxNodeConfig,
-    DEFAULT_CHAIN_ID,
-    DEFAULT_CONFLUX_BIN,
-    DEFAULT_EVM_CHAIN_ID,
-    DEFAULT_EVM_RPC_PORT,
-    DEFAULT_EVM_WS_PORT,
-    DEFAULT_RPC_PORT,
-    DEFAULT_WS_PORT,
-    build_single_node_conflux_config_text,
-)
+from remote_simulation.config_builder import SingleNodeConfig, single_node_config_text
 from utils.wait_until import wait_until
 
 
@@ -174,7 +164,7 @@ def _pos_config_source() -> Path:
     return Path(__file__).resolve().parent / "ref" / "zero-gravity-swap" / "pos_config"
 
 
-async def deploy_conflux_node(host: str, instance: EcsConfig, node: ConfluxNodeConfig) -> None:
+async def deploy_conflux_node(host: str, instance: EcsConfig, node: SingleNodeConfig) -> None:
     await wait_ssh(host, instance.ssh_username, instance.ssh_private_key_path, instance.wait_timeout)
     key_path = str(Path(instance.ssh_private_key_path).expanduser())
     conn = await asyncssh.connect(
@@ -193,10 +183,10 @@ async def deploy_conflux_node(host: str, instance: EcsConfig, node: ConfluxNodeC
                 logger.warning(result.stderr.strip())
 
         await run_remote("sudo mkdir -p /opt/conflux", check=True)
-        await run_remote(f"sudo mkdir -p {node.remote_config_dir}", check=True)
-        await run_remote(f"sudo mkdir -p {node.remote_data_dir}", check=True)
-        await run_remote(f"sudo mkdir -p {node.remote_log_dir}", check=True)
-        await run_remote(f"sudo mkdir -p {node.remote_pos_config_dir}", check=True)
+        await run_remote("sudo mkdir -p /opt/conflux/config", check=True)
+        await run_remote(f"sudo mkdir -p {node.data_dir}", check=True)
+        await run_remote("sudo mkdir -p /opt/conflux/logs", check=True)
+        await run_remote("sudo mkdir -p /opt/conflux/pos_config", check=True)
         await run_remote(
             "sudo bash -lc 'set -e; "
             "if [ ! -x "
@@ -213,10 +203,10 @@ async def deploy_conflux_node(host: str, instance: EcsConfig, node: ConfluxNodeC
         )
         await run_remote(f"sudo test -x {node.conflux_bin}", check=True)
 
-        config_text = build_single_node_conflux_config_text(node)
+        config_text = single_node_config_text(node)
         local_path = f"/tmp/conflux_{int(time.time())}.toml"
         Path(local_path).write_text(config_text)
-        remote_path = f"{node.remote_config_dir}/conflux_0.toml"
+        remote_path = "/opt/conflux/config/conflux_0.toml"
         await asyncssh.scp(local_path, (conn, remote_path))
         Path(local_path).unlink(missing_ok=True)
 
@@ -229,19 +219,19 @@ async def deploy_conflux_node(host: str, instance: EcsConfig, node: ConfluxNodeC
         remote_archive = f"/tmp/{pos_archive.name}"
         await asyncssh.scp(str(pos_archive), (conn, remote_archive))
         pos_archive.unlink(missing_ok=True)
-        await run_remote(f"sudo tar -xzf {remote_archive} -C {node.remote_pos_config_dir} --strip-components=1", check=True)
+        await run_remote(f"sudo tar -xzf {remote_archive} -C /opt/conflux/pos_config --strip-components=1", check=True)
         await run_remote(f"sudo rm -f {remote_archive}", check=False)
-        await run_remote(f"sudo mkdir -p {node.remote_pos_config_dir}/log", check=True)
+        await run_remote("sudo mkdir -p /opt/conflux/pos_config/log", check=True)
         await run_remote("sudo mkdir -p /app", check=True)
-        await run_remote(f"sudo ln -sfn {node.remote_pos_config_dir} /app/pos_config", check=True)
+        await run_remote("sudo ln -sfn /opt/conflux/pos_config /app/pos_config", check=True)
 
         await run_remote("sudo pkill -f 'conflux_0.toml' 2>/dev/null || true", check=False)
         await run_remote(
             " ".join(
                 [
                     f"sudo nohup {node.conflux_bin}",
-                    f"--config {node.remote_config_dir}/conflux_0.toml",
-                    f"> {node.remote_log_dir}/conflux_0.log 2>&1 &",
+                    "--config /opt/conflux/config/conflux_0.toml",
+                    "> /opt/conflux/logs/conflux_0.log 2>&1 &",
                 ]
             ),
             check=True,
@@ -250,11 +240,11 @@ async def deploy_conflux_node(host: str, instance: EcsConfig, node: ConfluxNodeC
 
         info_cmds = [
             f"sudo pgrep -af '{node.conflux_bin}' || true",
-            f"sudo tail -n 200 {node.remote_log_dir}/conflux_0.log || true",
+            "sudo tail -n 200 /opt/conflux/logs/conflux_0.log || true",
             f"sudo ss -ltnp | grep :{node.rpc_port} || true",
-            f"sudo curl -sS -H \"Content-Type: application/json\" -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"cfx_clientVersion\",\"params\":[]}}' http://127.0.0.1:{node.rpc_port} || true",
+            f'sudo curl -sS -H "Content-Type: application/json" -d \'{{"jsonrpc":"2.0","id":1,"method":"cfx_clientVersion","params":[]}}\' http://127.0.0.1:{node.rpc_port} || true',
             f"sudo ss -ltnp | grep :{node.evm_rpc_port} || true",
-            f"sudo curl -sS -H \"Content-Type: application/json\" -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_blockNumber\",\"params\":[]}}' http://127.0.0.1:{node.evm_rpc_port} || true",
+            f'sudo curl -sS -H "Content-Type: application/json" -d \'{{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}}\' http://127.0.0.1:{node.evm_rpc_port} || true',
         ]
         for cmd in info_cmds:
             res = await conn.run(cmd, check=False)
@@ -331,7 +321,7 @@ async def stop_docker_conflux_service(host: str, instance: EcsConfig, service_na
         await conn.run(f"sudo systemctl stop {service_name}.service", check=False)
 
 
-def authorize_instance_ports(instance: InstanceHandle, node: ConfluxNodeConfig) -> None:
+def authorize_instance_ports(instance: InstanceHandle, node: SingleNodeConfig) -> None:
     if not instance.config.security_group_id:
         raise RuntimeError("missing security_group_id after provisioning")
     for port in [node.rpc_port, node.ws_port, node.evm_rpc_port, node.evm_ws_port]:
@@ -360,13 +350,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--security-group-name", default="conflux-image-builder")
     parser.add_argument("--vpc-cidr", default="10.0.0.0/16")
     parser.add_argument("--vswitch-cidr", default="10.0.0.0/24")
-    parser.add_argument("--rpc-port", type=int, default=DEFAULT_RPC_PORT)
-    parser.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT)
-    parser.add_argument("--evm-rpc-port", type=int, default=DEFAULT_EVM_RPC_PORT)
-    parser.add_argument("--evm-ws-port", type=int, default=DEFAULT_EVM_WS_PORT)
-    parser.add_argument("--chain-id", type=int, default=DEFAULT_CHAIN_ID)
-    parser.add_argument("--evm-chain-id", type=int, default=DEFAULT_EVM_CHAIN_ID)
-    parser.add_argument("--conflux-bin", default=DEFAULT_CONFLUX_BIN, help="Path to conflux executable on the instance")
+    # SingleNodeConfig defaults
+    parser.add_argument("--rpc-port", type=int, default=12537)
+    parser.add_argument("--ws-port", type=int, default=12538)
+    parser.add_argument("--evm-rpc-port", type=int, default=12539)
+    parser.add_argument("--evm-ws-port", type=int, default=12540)
+    parser.add_argument("--chain-id", type=int, default=1024)
+    parser.add_argument("--evm-chain-id", type=int, default=1025)
+    parser.add_argument("--conflux-bin", default="/root/conflux", help="Path to conflux executable on the instance")
     parser.add_argument("--mining-author", default=None)
     parser.add_argument("--no-docker-image", action="store_true", help="Run conflux directly on the instance")
     parser.add_argument("--docker-service-name", default="conflux-docker")
@@ -401,7 +392,7 @@ def main() -> None:
         vswitch_cidr=args.vswitch_cidr,
         cpu_vendor=args.cpu_vendor,
     )
-    conflux_node = ConfluxNodeConfig(
+    conflux_node = SingleNodeConfig(
         rpc_port=args.rpc_port,
         ws_port=args.ws_port,
         evm_rpc_port=args.evm_rpc_port,
