@@ -11,8 +11,7 @@ from eth_account import Account
 from loguru import logger
 import requests
 
-from ali_instances.ecs_common import authorize_security_group_port, load_ali_credentials, load_endpoint, wait_for_ssh_ready
-from ali_instances.single_instance import SingleInstanceConfig, cleanup_single_instance, provision_single_instance
+from ali_instances.ali import EcsConfig, InstanceHandle, auth_port, cleanup_instance, client, load_credentials, load_endpoint, provision_instance, wait_ssh
 from conflux.config import (
     ConfluxNodeConfig,
     DEFAULT_CHAIN_ID,
@@ -175,8 +174,8 @@ def _pos_config_source() -> Path:
     return Path(__file__).resolve().parent / "ref" / "zero-gravity-swap" / "pos_config"
 
 
-async def deploy_conflux_node(host: str, instance: SingleInstanceConfig, node: ConfluxNodeConfig) -> None:
-    await wait_for_ssh_ready(host, instance.ssh_username, instance.ssh_private_key_path, instance.wait_timeout)
+async def deploy_conflux_node(host: str, instance: EcsConfig, node: ConfluxNodeConfig) -> None:
+    await wait_ssh(host, instance.ssh_username, instance.ssh_private_key_path, instance.wait_timeout)
     key_path = str(Path(instance.ssh_private_key_path).expanduser())
     conn = await asyncssh.connect(
         host,
@@ -265,7 +264,7 @@ async def deploy_conflux_node(host: str, instance: SingleInstanceConfig, node: C
                 logger.warning(f"remote stderr: {cmd}\n{res.stderr.strip()}")
 
 
-async def stop_conflux_node(host: str, instance: SingleInstanceConfig) -> None:
+async def stop_conflux_node(host: str, instance: EcsConfig) -> None:
     key_path = str(Path(instance.ssh_private_key_path).expanduser())
     async with asyncssh.connect(
         host,
@@ -276,8 +275,8 @@ async def stop_conflux_node(host: str, instance: SingleInstanceConfig) -> None:
         await conn.run("sudo pkill -f 'conflux_0.toml' 2>/dev/null || true", check=False)
 
 
-async def start_docker_conflux_service(host: str, instance: SingleInstanceConfig, service_name: str) -> None:
-    await wait_for_ssh_ready(host, instance.ssh_username, instance.ssh_private_key_path, instance.wait_timeout)
+async def start_docker_conflux_service(host: str, instance: EcsConfig, service_name: str) -> None:
+    await wait_ssh(host, instance.ssh_username, instance.ssh_private_key_path, instance.wait_timeout)
     key_path = str(Path(instance.ssh_private_key_path).expanduser())
     async with asyncssh.connect(
         host,
@@ -321,7 +320,7 @@ async def start_docker_conflux_service(host: str, instance: SingleInstanceConfig
         await conn.run(f"sudo systemctl status {service_name}.service --no-pager", check=False)
 
 
-async def stop_docker_conflux_service(host: str, instance: SingleInstanceConfig, service_name: str) -> None:
+async def stop_docker_conflux_service(host: str, instance: EcsConfig, service_name: str) -> None:
     key_path = str(Path(instance.ssh_private_key_path).expanduser())
     async with asyncssh.connect(
         host,
@@ -332,13 +331,11 @@ async def stop_docker_conflux_service(host: str, instance: SingleInstanceConfig,
         await conn.run(f"sudo systemctl stop {service_name}.service", check=False)
 
 
-def authorize_instance_ports(instance, node: ConfluxNodeConfig) -> None:
+def authorize_instance_ports(instance: InstanceHandle, node: ConfluxNodeConfig) -> None:
     if not instance.config.security_group_id:
         raise RuntimeError("missing security_group_id after provisioning")
-    authorize_security_group_port(instance.client, instance.config.region_id, instance.config.security_group_id, node.rpc_port)
-    authorize_security_group_port(instance.client, instance.config.region_id, instance.config.security_group_id, node.ws_port)
-    authorize_security_group_port(instance.client, instance.config.region_id, instance.config.security_group_id, node.evm_rpc_port)
-    authorize_security_group_port(instance.client, instance.config.region_id, instance.config.security_group_id, node.evm_ws_port)
+    for port in [node.rpc_port, node.ws_port, node.evm_rpc_port, node.evm_ws_port]:
+        auth_port(instance.client, instance.config.region_id, instance.config.security_group_id, port)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -379,9 +376,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
-    credentials = load_ali_credentials()
+    credentials = load_credentials()
     endpoint = args.endpoint or load_endpoint()
-    instance_config = SingleInstanceConfig(
+    instance_config = EcsConfig(
         credentials=credentials,
         image_id=args.image_id,
         instance_type=args.instance_type,
@@ -415,7 +412,7 @@ def main() -> None:
         mining_author=args.mining_author,
     )
 
-    instance = provision_single_instance(instance_config)
+    instance = provision_instance(instance_config)
     authorize_instance_ports(instance, conflux_node)
     use_docker = not args.no_docker_image
     if use_docker:
@@ -436,7 +433,7 @@ def main() -> None:
         asyncio.run(stop_docker_conflux_service(instance.public_ip, instance.config, args.docker_service_name))
     else:
         asyncio.run(stop_conflux_node(instance.public_ip, instance.config))
-    cleanup_single_instance(instance)
+    cleanup_instance(instance)
 
 
 if __name__ == "__main__":
