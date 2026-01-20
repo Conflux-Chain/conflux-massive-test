@@ -42,12 +42,13 @@ if __name__ == "__main__":
             common_tag=common_tag,
         )
         total_nodes = sum(h.nodes_per_host for h in hosts)
+        max_nodes_per_host = max(h.nodes_per_host for h in hosts)
         if total_nodes <= 0:
             raise RuntimeError("no nodes scheduled to start")
 
         simulation_config = SimulateOptions(
             target_nodes=total_nodes,
-            nodes_per_host=1,
+            nodes_per_host=max_nodes_per_host,
             num_blocks=1000,
             connect_peers=8,
             target_tps=17000,

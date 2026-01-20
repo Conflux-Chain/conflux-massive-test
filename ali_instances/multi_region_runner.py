@@ -177,11 +177,11 @@ def provision_aliyun_hosts(
 
         for region_cfg in regions:
             region_name = region_cfg["name"]
-            count = int(region_cfg.get("count", 0))
-            if count <= 0:
+            node_count = int(region_cfg.get("count", 0))
+            if node_count <= 0:
                 continue
 
-            logger.info(f"准备在 {region_name} 启动 {count} 个节点")
+            logger.info(f"准备在 {region_name} 启动 {node_count} 个 Conflux 节点")
             if region_name not in regions_used:
                 regions_used.append(region_name)
 
@@ -217,7 +217,7 @@ def provision_aliyun_hosts(
             def _no_stock(exc: Exception) -> bool:
                 return "OperationDenied.NoStock" in str(exc)
 
-            remaining_nodes = count
+            remaining_nodes = node_count
             last_successful_type: Optional[str] = None
             last_successful_nodes: Optional[int] = None
 
@@ -270,7 +270,7 @@ def provision_aliyun_hosts(
             if remaining_nodes > 0:
                 if not last_successful_type or not last_successful_nodes:
                     raise RuntimeError(f"no stock for all preferred types in {region_name}")
-                raise RuntimeError(f"not enough stock to reach {count} nodes in {region_name}")
+                raise RuntimeError(f"not enough stock to reach {node_count} nodes in {region_name}")
 
         if regions_used:
             cleanup_targets.append((regions_used, creds, user_tag, prefix))

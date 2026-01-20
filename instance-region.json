@@ -12,17 +12,27 @@
             },
             {
                "name":"ap-southeast-6",
-               "count":1
+               "count":1,
+               "type":[
+                  {
+                     "name":"ecs.g8i.large",
+                     "nodes":1
+                  },
+                  {
+                     "name":"ecs.g8i.xlarge",
+                     "nodes":1
+                  }
+               ]
             }
          ],
          "type":[
             {
                "name":"ecs.g8i.large",
-               "nodes":1
+               "nodes":2
             },
             {
                "name":"ecs.g8i.xlarge",
-               "nodes":1
+               "nodes":2
             }
          ]
       }
