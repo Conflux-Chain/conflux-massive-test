@@ -4,7 +4,113 @@ import conflux.config
 
 from loguru import logger
 from utils.tempfile import TempFile
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+
+@dataclass
+class SingleNodeConfig:
+    """Configuration for a single Conflux node in dev mode."""
+    rpc_port: int = 12537
+    ws_port: int = 12538
+    evm_rpc_port: int = 12539
+    evm_ws_port: int = 12540
+    chain_id: int = 1024
+    evm_chain_id: int = 1025
+    conflux_bin: str = "/root/conflux"
+    data_dir: str = "/opt/conflux/data"
+    log_file: str = "/opt/conflux/logs/conflux.log"
+    metrics_file: str = "/opt/conflux/logs/metrics.log"
+    pos_config_path: str = "/opt/conflux/pos_config/pos_config.yaml"
+    pos_initial_nodes_path: str = "/opt/conflux/pos_config/initial_nodes.json"
+    pos_private_key_path: str = "/opt/conflux/pos_config/pos_key"
+    node_type: str = "archive"
+    mode: str = "dev"
+    dev_block_interval_ms: int = 250
+    dev_pos_private_key_encryption_password: str = "CFXV20"
+    mining_author: Optional[str] = None
+    start_mining: bool = True
+    generate_tx: bool = True
+    generate_tx_period_us: int = 100000
+    txgen_account_count: int = 10
+    db_cache_size: int = 128
+    ledger_cache_size: int = 1024
+    tx_pool_size: int = 500000
+    storage_delta_mpts_cache_size: int = 200_000
+    storage_delta_mpts_cache_start_size: int = 200_000
+    storage_delta_mpts_slab_idle_size: int = 2_000_000
+    tanzanite_transition_height: int = 4
+    default_transition_time: int = 1
+    hydra_transition_number: int = 5
+    hydra_transition_height: int = 5
+    cip43_init_end_number: int = 5
+    pos_reference_enable_height: int = 0
+    dao_vote_transition_number: int = 6
+    dao_vote_transition_height: int = 6
+    sigma_fix_transition_number: int = 6
+    cip107_transition_number: int = 7
+    cip112_transition_height: int = 7
+    cip118_transition_number: int = 7
+    cip119_transition_number: int = 7
+    base_fee_burn_transition_number: int = 10
+    base_fee_burn_transition_height: int = 10
+    c2_fix_transition_height: int = 11
+    eoa_code_transition_height: int = 12
+    check_phase_change_period_ms: int = 100
+    enable_discovery: bool = False
+    metrics_enabled: bool = True
+    session_ip_limits: str = "0,0,0,0"
+    mining_type: str = "disable"
+    subnet_quota: int = 0
+    persist_tx_index: bool = True
+    persist_block_number_index: bool = True
+    execute_genesis: bool = False
+    dev_allow_phase_change_without_peer: bool = True
+    check_status_genesis: bool = False
+    min_phase_change_normal_peer_count: int = 1
+    enable_single_mpt_storage: bool = True
+    rpc_enable_metrics: bool = True
+    public_rpc_apis: str = "all"
+    public_evm_rpc_apis: str = "all"
+
+
+def _fmt_val(v: Any) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return f"\"{v}\""
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_fmt_val(x) for x in v) + "]"
+    return str(v)
+
+
+def single_node_config_text(cfg: SingleNodeConfig) -> str:
+    lines: list[str] = []
+    lines.append('bootnodes = ""')
+    lines.append('jsonrpc_http_host = "0.0.0.0"')
+    lines.append('jsonrpc_ws_host = "0.0.0.0"')
+    lines.append('jsonrpc_http_eth_host = "0.0.0.0"')
+    lines.append('jsonrpc_ws_eth_host = "0.0.0.0"')
+    field_map = {
+        "rpc_port": "jsonrpc_http_port",
+        "ws_port": "jsonrpc_ws_port",
+        "evm_rpc_port": "jsonrpc_http_eth_port",
+        "evm_ws_port": "jsonrpc_ws_eth_port",
+        "data_dir": "conflux_data_dir",
+        "log_file": "log_file",
+        "metrics_file": "metrics_output_file",
+    }
+    skip_fields = {"conflux_bin"}
+    for fld in cfg.__dataclass_fields__:
+        if fld in skip_fields:
+            continue
+        val = getattr(cfg, fld)
+        if val is None:
+            continue
+        key = field_map.get(fld, fld)
+        lines.append(f"{key} = {_fmt_val(val)}")
+    return "\n".join(lines)
 
 
 @dataclass
