@@ -12,6 +12,7 @@ from ali_instances.ali import (
     auth_port,
     cleanup_instance,
     client,
+    create_server_image,
     ensure_keypair,
     find_ubuntu,
     provision_instance,
@@ -32,6 +33,29 @@ DEFAULT_EVM_CHAIN_ID = 1025
 
 def _pos_config_source() -> Path:
     return Path(__file__).resolve().parent / "ref" / "zero-gravity-swap" / "pos_config"
+
+
+async def prepare_docker_server_image(host: str, cfg: EcsConfig) -> None:
+    await wait_ssh(host, cfg.ssh_username, cfg.ssh_private_key_path, cfg.wait_timeout)
+    key_path = str(Path(cfg.ssh_private_key_path).expanduser())
+    async with asyncssh.connect(host, username=cfg.ssh_username, client_keys=[key_path], known_hosts=None) as conn:
+        async def run(cmd: str, check: bool = True) -> None:
+            logger.info(f"remote: {cmd}")
+            r = await conn.run(cmd, check=False)
+            if r.stdout:
+                logger.info(r.stdout.strip())
+            if r.stderr:
+                logger.warning(r.stderr.strip())
+            if check and r.exit_status != 0:
+                raise RuntimeError(f"failed: {cmd}")
+
+        await run("sudo apt-get update -y")
+        await run("sudo apt-get install -y docker.io ca-certificates curl")
+        await run("sudo systemctl enable --now docker")
+        await run(
+            'echo "LABEL=cloudimg-rootfs / ext4 defaults,noatime,nodiratime,barrier=0 0 0" > fstab'
+        )
+        await run("sudo cp fstab /etc/fstab")
 
 
 async def deploy_docker_conflux(host: str, cfg: EcsConfig, node: SingleNodeConfig, image: str, service_name: str) -> None:
@@ -107,6 +131,10 @@ def main() -> None:
     ensure_keypair(base_client, cfg.region_id, cfg.key_pair_name, cfg.ssh_private_key_path)
     if not cfg.base_image_id and not cfg.image_id:
         cfg.base_image_id = find_ubuntu(base_client, cfg.region_id)
+    cfg.image_prefix = "conflux-docker"
+    cfg.conflux_git_ref = "docker-base"
+
+    cfg.image_id = create_server_image(cfg, prepare_fn=prepare_docker_server_image)
 
     node = SingleNodeConfig(
         rpc_port=DEFAULT_RPC_PORT,

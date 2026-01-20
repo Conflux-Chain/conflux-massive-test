@@ -339,21 +339,62 @@ def _img_name(prefix: str, ref: str) -> str:
     return f"{prefix}-conflux-{ref.replace('/', '-').replace(':', '-')}"
 
 
-def find_ubuntu(c: EcsClient, r: str) -> str:
-    resp = c.describe_images(ecs_models.DescribeImagesRequest(region_id=r, image_owner_alias="system", ostype="linux", architecture="x86_64", page_size=100))
-    imgs = [i for i in (resp.body.images.image or []) if i.image_name and i.image_name.startswith("ubuntu_20_04")]
-    if not imgs:
-        raise RuntimeError("no Ubuntu 20.04 image")
-    imgs.sort(key=lambda i: i.creation_time or "", reverse=True)
-    return imgs[0].image_id
-
-
 def find_img(c: EcsClient, r: str, name: str) -> Optional[str]:
     resp = c.describe_images(ecs_models.DescribeImagesRequest(region_id=r, image_name=name, image_owner_alias="self"))
     for i in resp.body.images.image or []:
         if i.image_name == name:
             return i.image_id
     return None
+
+
+def find_ubuntu(c: EcsClient, r: str, max_pages: int = 5, page_size: int = 50) -> str:
+    candidates: list[ecs_models.DescribeImagesResponseBodyImagesImage] = []
+    page_number = 1
+    while page_number <= max_pages:
+        resp = c.describe_images(
+            ecs_models.DescribeImagesRequest(
+                region_id=r,
+                image_owner_alias="system",
+                status="Available",
+                page_number=page_number,
+                page_size=page_size,
+            )
+        )
+        images = resp.body.images.image if resp.body and resp.body.images else []
+        if not images:
+            break
+        for img in images:
+            name = (img.image_name or "").lower()
+            if "ubuntu" not in name:
+                continue
+            if "arm" in name or "aarch64" in name:
+                continue
+            if "x86_64" not in name and "x64" not in name:
+                continue
+            candidates.append(img)
+        if len(images) < page_size:
+            break
+        page_number += 1
+
+    if not candidates:
+        raise RuntimeError("no ubuntu system image found")
+
+    def version_rank(name: str) -> int:
+        for idx, v in enumerate(["24", "22", "20", "18"]):
+            if f"ubuntu_{v}" in name or f"ubuntu-{v}" in name or f"ubuntu {v}" in name:
+                return idx
+        return 99
+
+    def sort_key(img: ecs_models.DescribeImagesResponseBodyImagesImage) -> tuple[int, str]:
+        name = (img.image_name or "").lower()
+        return (version_rank(name), img.creation_time or "")
+
+    candidates.sort(key=sort_key)
+    chosen = candidates[0]
+    if not chosen.image_id:
+        raise RuntimeError("ubuntu image missing image_id")
+    logger.info(f"selected ubuntu image: {chosen.image_id} ({chosen.image_name})")
+    return chosen.image_id
 
 
 def wait_img(c: EcsClient, r: str, img: str, poll: int, timeout: int) -> None:
@@ -405,7 +446,7 @@ def create_server_image(
     name = _img_name(cfg.image_prefix, cfg.conflux_git_ref)
     c = client(cfg.credentials, cfg.region_id, cfg.endpoint)
     if not cfg.base_image_id:
-        cfg.base_image_id = find_ubuntu(c, cfg.region_id)
+        raise RuntimeError("base_image_id is required")
     existing = find_img(c, cfg.region_id, name)
     if existing:
         logger.info(f"image exists: {existing}")
@@ -435,7 +476,7 @@ def create_server_image(
         ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
         logger.info(f"builder ready: {ip}")
         asyncio.run(prepare_fn(ip, cfg))
-        logger.info("stopping builder")
+        logger.info("stopping builder instance")
         stop_instance(c, iid, "StopCharging")
         wait_status(c, cfg.region_id, iid, ["Stopped"], cfg.poll_interval, cfg.wait_timeout)
         cr = c.create_image(ecs_models.CreateImageRequest(region_id=cfg.region_id, instance_id=iid, image_name=name))
@@ -444,7 +485,7 @@ def create_server_image(
             wait_status(c, cfg.region_id, iid, ["Stopped"], cfg.poll_interval, cfg.wait_timeout)
             cr = c.create_image(ecs_models.CreateImageRequest(region_id=cfg.region_id, instance_id=iid, image_name=name))
         img = cr.body.image_id
-        logger.info(f"image started: {img}")
+        logger.info(f"server image building started: {img}")
         wait_img(c, cfg.region_id, img, cfg.poll_interval, cfg.wait_timeout)
         return img
     finally:
