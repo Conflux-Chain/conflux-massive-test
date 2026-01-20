@@ -10,7 +10,8 @@ from eth_account import Account
 from loguru import logger
 import requests
 
-from ali_instances.ali import EcsConfig, InstanceHandle, auth_port, cleanup_instance, client, load_credentials, load_endpoint, provision_instance, wait_ssh
+from ali_instances.config import EcsConfig, client, load_credentials, load_endpoint
+from ali_instances.instance_prep import InstanceHandle, auth_port, cleanup_instance, provision_instance, wait_ssh
 from remote_simulation.config_builder import SingleNodeConfig, single_node_config_text
 from utils.wait_until import wait_until
 
