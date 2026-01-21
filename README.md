@@ -88,6 +88,25 @@ Requires pre-created instances stored in `instances.pkl`.
 }
 ```
 
+Credential loading: You can supply Aliyun credentials either directly in `instance-region.json` using the `access_key_id` and `access_key_secret` fields, or via environment variables (`ALI_ACCESS_KEY_ID` and `ALI_ACCESS_KEY_SECRET`) — the code uses values from `instance-region.json` when present and falls back to the environment (including `.env` via `python-dotenv`) if those fields are empty. Example:
+
+- In `instance-region.json`:
+
+```json
+{
+  "access_key_id": "AK...",
+  "access_key_secret": "SK..."
+}
+```
+
+- Or in `.env` / environment:
+
+```
+ALI_ACCESS_KEY_ID=AK...
+ALI_ACCESS_KEY_SECRET=SK...
+```
+
+If neither source provides credentials, provisioning will raise an error.
 #### Account fields
 
 | Field | Required | Description |
