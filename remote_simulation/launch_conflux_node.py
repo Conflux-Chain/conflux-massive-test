@@ -31,6 +31,8 @@ class HostSpec:
     ssh_user: str = "ubuntu"
     ssh_key_path: str | None = None
     provider: str | None = None
+    region: str | None = None
+    instance_id: str | None = None
 
 
 def launch_remote_nodes(hosts: Sequence[HostSpec], config_file: TempFile, pull_docker_image: bool = True) -> List[RemoteNode]:

@@ -18,18 +18,34 @@ pip install -r requirements.txt
 ### Running on Aliyun
 
 1. Configure `instance-region.json` (see configuration section below).
-2. Run the simulation:
+
+2. Provision servers (writes `ali_servers.json` to the repo root and an inventory under `logs/{timestamp}`):
+
+```bash
+./.venv/bin/python -m ali_instances.create_servers --config instance-region.json --hardware config/hardware.json
+```
+
+3. Run the simulation (reads `ali_servers.json`, does NOT create or delete instances):
 
 ```bash
 python remote_simulate_ali.py
 ```
 
-This will:
-- Provision ECS instances in specified regions
-- Launch Conflux nodes in Docker containers
-- Run the blockchain simulation
-- Collect logs and metrics
-- Clean up all resources automatically
+4. Cleanup the specific instances created earlier with the inventory JSON:
+
+```bash
+./.venv/bin/python -m ali_instances.cleanup_resources --instances-json ali_servers.json
+```
+
+Or, to cleanup all tagged resources across regions (legacy behavior):
+
+```bash
+./.venv/bin/python -m ali_instances.cleanup_resources
+```
+
+Notes:
+- The provisioning step tags resources and writes a machine-readable inventory (`ali_servers.json`) which `remote_simulate_ali.py` uses to run experiments.
+- Logs for a run are stored under `logs/{timestamp}` as created by the provisioning step (or the experiment will create a `logs/{timestamp}` folder if none is specified).
 
 ### Running on AWS (Legacy)
 
@@ -111,10 +127,10 @@ All Aliyun resources are tagged with:
 
 Resource names use prefix `conflux-massive-test-<user_tag>`.
 
-Resources are automatically cleaned up after the simulation. For manual cleanup:
+**Resources are NOT automatically cleaned up after the simulation. For manual cleanup:**
 
 ```bash
-python -m ali_instances.cleanup_resources
+./.venv/bin/python -m ali_instances.cleanup_resources
 ```
 
 ---

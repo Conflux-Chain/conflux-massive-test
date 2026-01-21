@@ -1,8 +1,11 @@
 """Cleanup tagged Aliyun ECS resources across regions."""
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional
 
 from alibabacloud_ecs20140526 import models as ecs_models
 from loguru import logger
@@ -133,5 +136,47 @@ def cleanup_all_regions(
             logger.warning(f"failed to list/delete vpcs in {region_id}: {exc}")
 
 
+def cleanup_from_json(
+    json_path: Path,
+    *,
+    credentials=None,
+) -> None:
+    data = json.loads(json_path.read_text())
+    # Import loader locally to avoid cyclic imports at module import time
+    from .create_servers import load_host_specs
+
+    hosts = load_host_specs(data)
+
+    cfg = EcsConfig(credentials=credentials or EcsConfig().credentials)
+    by_region: Dict[str, List[str]] = {}
+    for h in hosts:
+        region = h.region
+        instance_id = h.instance_id
+        if not region or not instance_id:
+            logger.warning(f"skip entry without region/instance_id: {h}")
+            continue
+        by_region.setdefault(region, []).append(instance_id)
+
+    for region_id, instance_ids in by_region.items():
+        logger.info(f"cleanup instances in region {region_id}")
+        c = client(cfg.credentials, region_id, cfg.endpoint)
+        for iid in instance_ids:
+            try:
+                delete_instance(c, region_id, iid)
+                logger.info(f"deleted instance {iid} in {region_id}")
+            except Exception as exc:
+                logger.warning(f"failed to delete instance {iid}: {exc}")
+
+
 if __name__ == "__main__":
-    cleanup_all_regions()
+    parser = argparse.ArgumentParser(description="Cleanup Aliyun ECS resources.")
+    parser.add_argument(
+        "--instances-json",
+        help="Path to ali_servers.json to cleanup only listed instances",
+    )
+    args = parser.parse_args()
+
+    if args.instances_json:
+        cleanup_from_json(Path(args.instances_json))
+    else:
+        cleanup_all_regions()

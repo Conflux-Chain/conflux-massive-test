@@ -242,6 +242,8 @@ def provision_aliyun_hosts(
                                     ssh_user=cfg.ssh_username,
                                     ssh_key_path=str(Path(cfg.ssh_private_key_path).expanduser()),
                                     provider="aliyun",
+                                    region=region_name,
+                                    instance_id=handle.instance_id,
                                 )
                             )
                             remaining_nodes -= spec.nodes_per_host
