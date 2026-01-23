@@ -115,6 +115,8 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
     if not script_local.exists():
         raise FileNotFoundError(f"missing {script_local}")
 
+    Path(local_path).mkdir(parents=True, exist_ok=True)
+
     def _stop_and_collect(node: RemoteNode) -> int:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
@@ -123,9 +125,11 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
             shell_cmds.ssh(node.host, "root", ["rm", "-f", remote_script])
             cnt1 = counter1.increment()
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
-            shell_cmds.scp_download(
-                f"./output{node.index}/",
-                f"./{local_path}/{node.id}/",
+            local_node_path = str(Path(local_path) / node.id)
+            Path(local_node_path).mkdir(parents=True, exist_ok=True)
+            shell_cmds.rsync_download(
+                f"/root/output{node.index}/",
+                local_node_path,
                 node.host,
                 user="root",
             )
