@@ -65,6 +65,9 @@ def cleanup_all_regions(
     tag_filter = TagFilter(common_key=common_tag, common_value=common_tag_value, user_key=user_tag_key, user_value=user_tag)
     prefix = name_prefix or f"{common_tag}-{user_tag}"
 
+    total_deleted = 0
+    observed_user_pairs: set[tuple[str, Optional[str]]] = set()
+
     for region_id in regions:
         logger.info(f"cleanup region {region_id}")
         c = client(cfg.credentials, region_id, cfg.endpoint)
@@ -73,12 +76,18 @@ def cleanup_all_regions(
             # Delete instances by tags
             for inst in _iter_instances(c, region_id):
                 tags = inst.tags.tag if inst.tags else []
+                # record instances that have the common tag (regardless of user tag value)
+                tag_map = {t.tag_key: t.tag_value for t in tags if t.tag_key}
+                if tag_map.get(tag_filter.common_key) == tag_filter.common_value:
+                    observed_user_pairs.add((user_tag_key, tag_map.get(user_tag_key)))
+
                 if not tag_filter.matches(tags):
                     continue
                 if not inst.instance_id:
                     continue
                 try:
                     delete_instance(c, region_id, inst.instance_id)
+                    total_deleted += 1
                     logger.info(f"deleted instance {inst.instance_id} in {region_id}")
                 except Exception as exc:
                     logger.warning(f"failed to delete instance {inst.instance_id}: {exc}")
@@ -140,7 +149,16 @@ def cleanup_all_regions(
                     logger.warning(f"failed to delete vpc {vpc.vpc_id}: {exc}")
         except Exception as exc:
             logger.warning(f"failed to list/delete vpcs in {region_id}: {exc}")
-
+    # If we deleted nothing, print observed user tag values for instances that had the common tag
+    if total_deleted == 0:
+        if observed_user_pairs:
+            pairs = ", ".join(f"{k}={v if v is not None else '<missing>'}" for k, v in sorted(observed_user_pairs))
+            logger.warning(
+                f"No instances deleted for filter user_tag_key={user_tag_key}, user_tag_value={user_tag}. "
+                f"However, the following user tag(s) were observed on resources with {common_tag}={common_tag_value}: {pairs}"
+            )
+        else:
+            logger.warning(f"No instances found with {common_tag}={common_tag_value} in the queried regions.")
 
 def cleanup_from_json(
     json_path: Path,
