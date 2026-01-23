@@ -2,6 +2,7 @@
 import asyncio
 import ipaddress
 import json
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -29,6 +30,18 @@ async def wait_ssh(host: str, user: str, key: str, timeout: int, interval: int =
         except Exception:
             await asyncio.sleep(interval)
     raise TimeoutError(f"SSH not ready for {host}")
+
+
+def wait_ssh_port(host: str, port: int, timeout: int, interval: int = 3) -> None:
+    """Wait until the SSH port is reachable without authenticating."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=interval):
+                return
+        except Exception:
+            time.sleep(interval)
+    raise TimeoutError(f"SSH port not ready for {host}:{port}")
 
 
 def _tag_dict(cfg: EcsConfig) -> dict[str, str]:
@@ -353,6 +366,11 @@ def _provision_instance(c: EcsClient, cfg: EcsConfig, ports: Sequence[int], disk
             logger.warning(f"start_instance failed for {iid}: {exc}. Will wait for instance to become Running.")
     allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
     ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
+    try:
+        wait_ssh_port(ip, 22, cfg.wait_timeout, cfg.poll_interval)
+        logger.info(f"ssh port ready: {ip}:22")
+    except TimeoutError as exc:
+        logger.warning(f"ssh port check timed out for {ip}: {exc}")
     logger.info(f"instance ready: {ip}")
     return InstanceHandle(client=c, config=cfg, instance_id=iid, public_ip=ip)
 
