@@ -6,7 +6,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Dict, Tuple
+from typing import Optional, Sequence
 
 import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
@@ -15,9 +15,6 @@ from loguru import logger
 
 from utils.wait_until import wait_until
 from .config import EcsConfig, client
-
-# Cache: maps vswitch_id -> (zone_id, vpc_id). Only store when vswitch is Available.
-_VSWITCH_CACHE: Dict[str, Tuple[str, str]] = {}
 
 
 async def wait_ssh(host: str, user: str, key: str, timeout: int, interval: int = 3) -> None:
@@ -114,11 +111,13 @@ def pick_zone(c: EcsClient, r: str) -> str:
     return zones[0].zone_id
 
 
-def ensure_vpc(c: EcsClient, r: str, name: str, cidr: str) -> str:
+def ensure_vpc(c: EcsClient, r: str, name: str, cidr: str, allow_create: bool = True) -> str:
     resp = c.describe_vpcs(ecs_models.DescribeVpcsRequest(region_id=r, page_size=50))
     for v in resp.body.vpcs.vpc or []:
         if v.vpc_name == name:
             return v.vpc_id
+    if not allow_create:
+        raise RuntimeError(f"vpc {name} not found in {r}")
     cr = c.create_vpc(ecs_models.CreateVpcRequest(region_id=r, vpc_name=name, cidr_block=cidr))
     vid = cr.body.vpc_id
     wait_until(lambda: _vpc_available(c, r, vid), timeout=120, retry_interval=3)
@@ -139,53 +138,15 @@ def ensure_vswitch(
     name: str,
     cidr: str,
     vpc_cidr: str,
-    existing_vswitch_id: Optional[str] = None,
+    allow_create: bool = True,
 ) -> str:
-    """Validate and/or create a vSwitch in the specified zone.
-
-    If `existing_vswitch_id` is provided and valid (belongs to the same zone and VPC
-    and is Available), it will be reused. Otherwise, try to find a vSwitch by the
-    standard name ("{name}-zone{zone}") or create a new one.
-    """
-    # If caller gave explicit vSwitch id, validate it first and reuse if OK.
-    # Use a short in-memory cache to avoid extra Describe calls when the id was
-    # already validated previously. Only cache when the vSwitch is Available.
-    if existing_vswitch_id:
-        try:
-            # fast-path: cached mapping (vswitch_id -> (zone, vpc))
-            cached = _VSWITCH_CACHE.get(existing_vswitch_id)
-            if cached:
-                czone, cvpc = cached
-                if czone == zone and cvpc == vpc:
-                    return existing_vswitch_id
-                logger.warning(f"cached vSwitch {existing_vswitch_id} mapped to zone {czone}/vpc {cvpc}, expected {zone}/{vpc}.")
-                raise RuntimeError("vSwitch in wrong zone/vpc")
-
-            resp = c.describe_vswitches(
-                ecs_models.DescribeVSwitchesRequest(region_id=r, v_switch_id=existing_vswitch_id)
-            )
-            vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
-            if vsws:
-                v = vsws[0]
-                if v.zone_id != zone or v.vpc_id != vpc:
-                    logger.warning(f"vSwitch {existing_vswitch_id} in region {r} exists but is in zone {v.zone_id}/vpc {v.vpc_id} (expected {zone}/{vpc}).")
-                    raise RuntimeError("vSwitch in wrong zone/vpc")
-
-                # If vSwitch is already available, cache and reuse it.
-                if v.status != "Available":
-                    wait_until(lambda: _vswitch_ok(c, r, existing_vswitch_id), timeout=120, retry_interval=3)
-                _VSWITCH_CACHE[existing_vswitch_id] = (v.zone_id, v.vpc_id)
-                return existing_vswitch_id
-        except Exception as exc:
-            logger.warning(f"invalid vSwitch {existing_vswitch_id}: {exc}. Will (re)create.")
-
-    # Normal path: find by name in this VPC/zone or create one
-    name = f"{name}-zone{zone}"
     resp = c.describe_vswitches(ecs_models.DescribeVSwitchesRequest(region_id=r, vpc_id=vpc, page_size=50))
     vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
     for v in vsws:
         if v.v_switch_name == name and v.zone_id == zone:
             return v.v_switch_id
+    if not allow_create:
+        raise RuntimeError(f"vswitch {name} not found in {r}/{zone}")
     existing = [v.cidr_block for v in vsws if v.cidr_block]
     net = ipaddress.ip_network(cidr)
     if any(net.overlaps(ipaddress.ip_network(e)) for e in existing if e):
@@ -206,11 +167,21 @@ def _vswitch_ok(c: EcsClient, r: str, vsid: str) -> bool:
     return vsws and vsws[0].status == "Available"
 
 
-def ensure_sg(c: EcsClient, r: str, vpc: str, name: str) -> str:
+def _vswitch_zone(c: EcsClient, r: str, vsid: str) -> Optional[str]:
+    resp = c.describe_vswitches(ecs_models.DescribeVSwitchesRequest(region_id=r, v_switch_id=vsid))
+    vsws = resp.body.v_switches.v_switch if resp.body and resp.body.v_switches else []
+    if not vsws:
+        return None
+    return vsws[0].zone_id
+
+
+def ensure_sg(c: EcsClient, r: str, vpc: str, name: str, allow_create: bool = True) -> str:
     resp = c.describe_security_groups(ecs_models.DescribeSecurityGroupsRequest(region_id=r, vpc_id=vpc, page_size=50))
     for g in resp.body.security_groups.security_group or []:
         if g.security_group_name == name:
             return g.security_group_id
+    if not allow_create:
+        raise RuntimeError(f"security group {name} not found in {r}")
     return c.create_security_group(
         ecs_models.CreateSecurityGroupRequest(region_id=r, vpc_id=vpc, security_group_name=name, description="conflux")
     ).body.security_group_id
@@ -232,23 +203,66 @@ def auth_port(c: EcsClient, r: str, sg: str, port: int) -> None:
     )
 
 
-def ensure_net(c: EcsClient, cfg: EcsConfig, ports: Sequence[int] = ()) -> None:
+def ensure_vpc_and_vswitch(
+    c: EcsClient,
+    cfg: EcsConfig,
+    allow_create_vpc: bool = True,
+    allow_create_vswitch: bool = True,
+) -> tuple[str, str]:
     cfg.zone_id = cfg.zone_id or pick_zone(c, cfg.region_id)
-    vpc = ensure_vpc(c, cfg.region_id, cfg.vpc_name, cfg.vpc_cidr)
-    # Validate or create vSwitch in a single place. If caller supplied an explicit
-    # vSwitch id, pass it to ensure_vswitch so it can be validated and reused when
-    # possible. This avoids multiple describe_vswitches calls and duplicate logic.
-    cfg.v_switch_id = ensure_vswitch(
+    vpc = ensure_vpc(c, cfg.region_id, cfg.vpc_name, cfg.vpc_cidr, allow_create=allow_create_vpc)
+    if cfg.v_switch_id:
+        vs_zone = _vswitch_zone(c, cfg.region_id, cfg.v_switch_id)
+        if not vs_zone:
+            if not allow_create_vswitch:
+                raise RuntimeError(f"vswitch {cfg.v_switch_id} not found in {cfg.region_id}")
+            logger.warning(f"vswitch {cfg.v_switch_id} missing; will create a new vswitch in {cfg.zone_id}")
+            cfg.v_switch_id = None
+        elif vs_zone != cfg.zone_id:
+            msg = (
+                f"vswitch {cfg.v_switch_id} is in zone {vs_zone}, "
+                f"but target zone is {cfg.zone_id}"
+            )
+            if not allow_create_vswitch:
+                raise RuntimeError(msg)
+            logger.warning(f"{msg}; will create a new vswitch in {cfg.zone_id}")
+            cfg.v_switch_id = None
+
+    if not cfg.v_switch_id:
+        cfg.v_switch_id = ensure_vswitch(
+            c,
+            cfg.region_id,
+            vpc,
+            cfg.zone_id,
+            cfg.vswitch_name,
+            cfg.vswitch_cidr,
+            cfg.vpc_cidr,
+            allow_create=allow_create_vswitch,
+        )
+    return vpc, cfg.v_switch_id
+
+
+def ensure_net(
+    c: EcsClient,
+    cfg: EcsConfig,
+    ports: Sequence[int] = (),
+    allow_create_vpc: bool = True,
+    allow_create_vswitch: bool = True,
+    allow_create_sg: bool = True,
+) -> None:
+    vpc, _ = ensure_vpc_and_vswitch(
+        c,
+        cfg,
+        allow_create_vpc=allow_create_vpc,
+        allow_create_vswitch=allow_create_vswitch,
+    )
+    cfg.security_group_id = cfg.security_group_id or ensure_sg(
         c,
         cfg.region_id,
         vpc,
-        cfg.zone_id,
-        cfg.vswitch_name,
-        cfg.vswitch_cidr,
-        cfg.vpc_cidr,
-        existing_vswitch_id=cfg.v_switch_id,
+        cfg.security_group_name,
+        allow_create=allow_create_sg,
     )
-    cfg.security_group_id = cfg.security_group_id or ensure_sg(c, cfg.region_id, vpc, cfg.security_group_name)
     tags = _tag_dict(cfg)
     try:
         if cfg.security_group_id:
@@ -378,10 +392,12 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
     return ids
 
 
-def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str) -> None:
+def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str, allow_create: bool = True) -> None:
     resp = c.describe_key_pairs(ecs_models.DescribeKeyPairsRequest(region_id=r, key_pair_name=name))
     if resp.body.key_pairs.key_pair:
         return
+    if not allow_create:
+        raise RuntimeError(f"keypair {name} not found in {r}")
     kp = Path(key_path).expanduser().resolve()
     if not kp.exists():
         kp.parent.mkdir(parents=True, exist_ok=True)
@@ -403,8 +419,23 @@ class InstanceHandle:
     public_ip: str
 
 
-def _provision_instance(c: EcsClient, cfg: EcsConfig, ports: Sequence[int], disk_size: int) -> InstanceHandle:
-    ensure_net(c, cfg, ports)
+def _provision_instance(
+    c: EcsClient,
+    cfg: EcsConfig,
+    ports: Sequence[int],
+    disk_size: int,
+    allow_create_vpc: bool = True,
+    allow_create_vswitch: bool = True,
+    allow_create_sg: bool = True,
+) -> InstanceHandle:
+    ensure_net(
+        c,
+        cfg,
+        ports,
+        allow_create_vpc=allow_create_vpc,
+        allow_create_vswitch=allow_create_vswitch,
+        allow_create_sg=allow_create_sg,
+    )
     iid = create_instance(c, cfg, disk_size=disk_size, amount=1)[0]
     logger.info(f"instance: {iid}")
     st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
@@ -425,10 +456,21 @@ def provision_instance_with_type(
     zone_id: Optional[str],
     ports: Sequence[int],
     v_switch_id: Optional[str] = None,
+    allow_create_vpc: bool = True,
+    allow_create_vswitch: bool = True,
+    allow_create_sg: bool = True,
 ) -> InstanceHandle:
     c = client(cfg.credentials, cfg.region_id, cfg.endpoint)
     cfg.instance_type = instance_type
     cfg.zone_id = zone_id or cfg.zone_id
     if v_switch_id is not None:
         cfg.v_switch_id = v_switch_id
-    return _provision_instance(c, cfg, ports=ports, disk_size=100)
+    return _provision_instance(
+        c,
+        cfg,
+        ports=ports,
+        disk_size=100,
+        allow_create_vpc=allow_create_vpc,
+        allow_create_vswitch=allow_create_vswitch,
+        allow_create_sg=allow_create_sg,
+    )

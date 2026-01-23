@@ -93,6 +93,31 @@ def main() -> None:
         default="conflux-massive-test",
         help="Common tag value for Aliyun resources",
     )
+    parser.add_argument(
+        "--network-only",
+        action="store_true",
+        help="Only create VPC/VSwitch resources without launching instances",
+    )
+    parser.add_argument(
+        "--no-create-vpc",
+        action="store_true",
+        help="Do not automatically create VPCs when missing",
+    )
+    parser.add_argument(
+        "--no-create-vswitch",
+        action="store_true",
+        help="Do not automatically create VSwitches when missing",
+    )
+    parser.add_argument(
+        "--no-create-sg",
+        action="store_true",
+        help="Do not automatically create Security Groups when missing",
+    )
+    parser.add_argument(
+        "--no-create-keypair",
+        action="store_true",
+        help="Do not automatically create KeyPairs when missing",
+    )
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -103,14 +128,24 @@ def main() -> None:
         config_path=config_path,
         hardware_path=hardware_path,
         common_tag=args.common_tag,
+        network_only=args.network_only,
+        allow_create_vpc=not args.no_create_vpc,
+        allow_create_vswitch=not args.no_create_vswitch,
+        allow_create_sg=not args.no_create_sg,
+        allow_create_keypair=not args.no_create_keypair,
     )
-    if not hosts:
+    if not hosts and not args.network_only:
         raise RuntimeError("no Aliyun hosts were provisioned")
 
     timestamp = generate_timestamp()
     log_dir = root / "logs" / timestamp
     write_inventory(hosts, timestamp, log_dir, root)
-    logger.success(f"Aliyun instance inventory written to {log_dir}/ali_servers.json and {root}/ali_servers.json")
+    if args.network_only:
+        logger.success(
+            f"Aliyun network resources ensured; inventory written to {log_dir}/ali_servers.json and {root}/ali_servers.json"
+        )
+    else:
+        logger.success(f"Aliyun instance inventory written to {log_dir}/ali_servers.json and {root}/ali_servers.json")
 
 
 if __name__ == "__main__":

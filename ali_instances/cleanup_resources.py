@@ -56,6 +56,7 @@ def cleanup_all_regions(
     user_tag: str = DEFAULT_USER_TAG_VALUE,
     user_tag_key: str = DEFAULT_USER_TAG_KEY,
     name_prefix: Optional[str] = None,
+    delete_network: bool = False,
 ) -> None:
     cfg = EcsConfig(credentials=credentials or EcsConfig().credentials)
     if regions is None:
@@ -68,18 +69,21 @@ def cleanup_all_regions(
         logger.info(f"cleanup region {region_id}")
         c = client(cfg.credentials, region_id, cfg.endpoint)
 
-        # Delete instances by tags
-        for inst in _iter_instances(c, region_id):
-            tags = inst.tags.tag if inst.tags else []
-            if not tag_filter.matches(tags):
-                continue
-            if not inst.instance_id:
-                continue
-            try:
-                delete_instance(c, region_id, inst.instance_id)
-                logger.info(f"deleted instance {inst.instance_id} in {region_id}")
-            except Exception as exc:
-                logger.warning(f"failed to delete instance {inst.instance_id}: {exc}")
+        try:
+            # Delete instances by tags
+            for inst in _iter_instances(c, region_id):
+                tags = inst.tags.tag if inst.tags else []
+                if not tag_filter.matches(tags):
+                    continue
+                if not inst.instance_id:
+                    continue
+                try:
+                    delete_instance(c, region_id, inst.instance_id)
+                    logger.info(f"deleted instance {inst.instance_id} in {region_id}")
+                except Exception as exc:
+                    logger.warning(f"failed to delete instance {inst.instance_id}: {exc}")
+        except Exception as exc:
+            logger.warning(f"failed to list/delete instances in {region_id}: {exc}")
 
         # Best-effort cleanup of security groups with the same prefix
         try:
@@ -102,6 +106,8 @@ def cleanup_all_regions(
         except Exception as exc:
             logger.warning(f"failed to list/delete security groups in {region_id}: {exc}")
 
+        if not delete_network:
+            continue
         # Best-effort cleanup of vpcs/vswitches with the same prefix
         # try-catch is needed
         try:
@@ -173,6 +179,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--instances-json",
         help="Path to ali_servers.json to cleanup only listed instances",
+    )
+    parser.add_argument(
+        "--delete-network",
+        action="store_true",
+        help="Also delete VPC/VSwitch resources with the matching prefix",
     )
     args = parser.parse_args()
 

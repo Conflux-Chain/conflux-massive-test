@@ -13,6 +13,7 @@ from ali_instances.config import AliCredentials, EcsConfig, client, DEFAULT_USER
 from ali_instances.image_build import DEFAULT_IMAGE_NAME, ensure_images_in_regions
 from ali_instances.instance_prep import (
     ensure_keypair,
+    ensure_vpc_and_vswitch,
     list_zones_for_instance_type,
     provision_instance_with_type,
 )
@@ -122,6 +123,11 @@ def provision_aliyun_hosts(
     config_path: Path,
     hardware_path: Path,
     common_tag: str = "conflux-massive-test",
+    network_only: bool = False,
+    allow_create_vpc: bool = True,
+    allow_create_vswitch: bool = True,
+    allow_create_sg: bool = True,
+    allow_create_keypair: bool = True,
 ) -> Tuple[List[HostSpec], List[CleanupTarget]]:
     config = load_json(config_path)
     hardware_defaults = load_hardware_defaults(hardware_path)
@@ -143,7 +149,7 @@ def provision_aliyun_hosts(
         active_regions = [r for r in regions if int(r.get("count", 0)) > 0]
         image_ids_by_region: Dict[str, str] = {}
 
-        if active_regions:
+        if active_regions and not network_only:
             image_name_groups: Dict[str, List[str]] = {}
             for region_cfg in active_regions:
                 region_name = region_cfg["name"]
@@ -200,7 +206,13 @@ def provision_aliyun_hosts(
                 cfg.zone_id = zones_cfg[0].get("name") or cfg.zone_id
                 cfg.v_switch_id = zones_cfg[0].get("subnet") or cfg.v_switch_id
 
-            ensure_keypair(region_client, region_name, cfg.key_pair_name, cfg.ssh_private_key_path)
+            ensure_keypair(
+                region_client,
+                region_name,
+                cfg.key_pair_name,
+                cfg.ssh_private_key_path,
+                allow_create=allow_create_keypair,
+            )
 
             cfg.image_id = image_ids_by_region.get(region_name)
             if not cfg.image_id:
@@ -233,6 +245,9 @@ def provision_aliyun_hosts(
                                 zone_id,
                                 ports,
                                 v_switch_id=zone_subnet,
+                                allow_create_vpc=allow_create_vpc,
+                                allow_create_vswitch=allow_create_vswitch,
+                                allow_create_sg=allow_create_sg,
                             )
                             region_hosts.append(
                                 HostSpec(
@@ -269,8 +284,55 @@ def provision_aliyun_hosts(
 
             return region_name, region_hosts
 
+        def _ensure_region_network(region_cfg: Dict) -> tuple[str, List[HostSpec]]:
+            region_name = region_cfg["name"]
+            logger.info(f"准备在 {region_name} 创建 VPC/VSwitch")
+
+            region_client = client(creds, region_name, None)
+            cfg = EcsConfig(credentials=creds, region_id=region_name)
+            cfg.instance_name_prefix = prefix
+            cfg.vpc_name = prefix
+            cfg.vswitch_name = prefix
+            cfg.security_group_name = prefix
+            cfg.common_tag_key = common_tag
+            cfg.common_tag_value = "true"
+            cfg.user_tag_value = user_tag
+
+            zones_cfg = region_cfg.get("zones") or []
+            if zones_cfg:
+                for zone_cfg in zones_cfg:
+                    cfg.zone_id = zone_cfg.get("name")
+                    cfg.v_switch_id = zone_cfg.get("subnet")
+                    ensure_vpc_and_vswitch(
+                        region_client,
+                        cfg,
+                        allow_create_vpc=allow_create_vpc,
+                        allow_create_vswitch=allow_create_vswitch,
+                    )
+                    cfg.v_switch_id = None
+            else:
+                cfg.zone_id = None
+                cfg.v_switch_id = None
+                ensure_vpc_and_vswitch(
+                    region_client,
+                    cfg,
+                    allow_create_vpc=allow_create_vpc,
+                    allow_create_vswitch=allow_create_vswitch,
+                )
+
+            return region_name, []
+
         active_regions = [r for r in regions if int(r.get("count", 0)) > 0]
-        if active_regions:
+        if active_regions and network_only:
+            async def _ensure_all_regions() -> List[tuple[str, List[HostSpec]]]:
+                tasks = [asyncio.to_thread(_ensure_region_network, region_cfg) for region_cfg in active_regions]
+                return await asyncio.gather(*tasks)
+
+            for region_name, _ in asyncio.run(_ensure_all_regions()):
+                if region_name not in regions_used:
+                    regions_used.append(region_name)
+
+        if active_regions and not network_only:
             async def _provision_all_regions() -> List[tuple[str, List[HostSpec]]]:
                 tasks = [asyncio.to_thread(_provision_region, region_cfg) for region_cfg in active_regions]
                 return await asyncio.gather(*tasks)
