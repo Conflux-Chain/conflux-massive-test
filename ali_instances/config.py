@@ -85,5 +85,7 @@ def client(creds: AliCredentials, region: str, endpoint: Optional[str] = None) -
             access_key_secret=creds.access_key_secret,
             region_id=region,
             endpoint=endpoint,
+            read_timeout=120_000,
+            connect_timeout=120_000
         )
     )
