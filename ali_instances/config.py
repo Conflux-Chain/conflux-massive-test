@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_REGION = "ap-southeast-3"
-DEFAULT_KEYPAIR = "conflux-image-builder-ssh-key"
+DEFAULT_SSH_KEY_NAME = os.getenv("SSH_KEY_NAME", "conflux-image-builder-ssh-key")
 DEFAULT_SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "./keys/ssh-key.pem")
 DEFAULT_VPC = "conflux-image-builder"
 DEFAULT_VPC_CIDR = "10.0.0.0/16"
@@ -48,7 +48,7 @@ class EcsConfig:
     security_group_name: str = DEFAULT_VPC
     vpc_cidr: str = DEFAULT_VPC_CIDR
     vswitch_cidr: str = DEFAULT_VSWITCH_CIDR
-    key_pair_name: str = DEFAULT_KEYPAIR
+    key_pair_name: str = DEFAULT_SSH_KEY_NAME
     ssh_username: str = "root"
     ssh_private_key_path: str = DEFAULT_SSH_KEY_PATH
     conflux_git_ref: str = "v3.0.2"

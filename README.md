@@ -9,6 +9,7 @@ A distributed testing framework for Conflux blockchain nodes across cloud provid
 - Python 3.11+
 - Aliyun account with ECS access (or AWS for legacy runs)
 - SSH private key available locally (optional): set `SSH_KEY_PATH` to point to your SSH private key. If `SSH_KEY_PATH` is not set and the repository contains `keys/ssh-key.pem`, that key will be used automatically.
+- SSH keypair name on Aliyun (optional): set `SSH_KEY_NAME` to control the name used when importing/creating the keypair on Aliyun (default: `conflux-image-builder-ssh-key`).
 
 ### Installation
 
