@@ -1,5 +1,6 @@
 """Instance preparation and lifecycle helpers for Aliyun ECS."""
 import asyncio
+import copy
 import ipaddress
 import json
 import subprocess
@@ -7,7 +8,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
@@ -15,7 +16,7 @@ from alibabacloud_ecs20140526.client import Client as EcsClient
 from loguru import logger
 
 from utils.wait_until import wait_until
-from .config import EcsConfig, client
+from .config import EcsConfig, client, RUN_INSTANCES_MAX_AMOUNT
 
 
 async def wait_ssh(host: str, user: str, key: str, timeout: int, interval: int = 3) -> None:
@@ -376,7 +377,7 @@ def _instances_failed_by_history(c: EcsClient, r: str, instance_ids: Sequence[st
     return failed
 
 
-def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: int) -> list[str]:
+def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: int, allow_partial_success: bool = False) -> list[str]:
     dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
     disk = ecs_models.RunInstancesRequestSystemDisk(category=dcat, size=str(disk_size)) if dcat else None
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
@@ -396,6 +397,8 @@ def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: in
         tag=tags,
         amount=amount,
     )
+    if allow_partial_success:
+        req.min_amount = 1
     if cfg.use_spot:
         req.spot_strategy = cfg.spot_strategy
     if disk:
@@ -427,40 +430,70 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
     zone_candidates = [cfg.zone_id] + [z for z in zones if z != cfg.zone_id]
 
     remaining = amount
-    successful_ids: list[str] = []
+    region_instance_ids: list[str] = []
+
+    # 尝试在相同 zone 开所有节点
+    if amount <= RUN_INSTANCES_MAX_AMOUNT:
+        for zone_id in zone_candidates:
+            if remaining <= 0:
+                break
+
+            zone_instance_ids = _create_instance_in_zone(c, copy.deepcopy(cfg), zone_id, disk_size=disk_size, amount=remaining, allow_partial_success = False)
+            
+            region_instance_ids.extend(zone_instance_ids)
+            remaining = amount - len(region_instance_ids)
+
+    # 尝试在不同 zone 开节点
     for zone_id in zone_candidates:
         if remaining <= 0:
             break
-        cfg.zone_id = zone_id
-        if zone_id != zone_candidates[0]:
-            cfg.v_switch_id = None
-            try:
-                ensure_vpc_and_vswitch(c, cfg, allow_create_vpc=True, allow_create_vswitch=True)
-            except Exception as exc:
-                logger.warning(f"failed to ensure vswitch for zone {zone_id}: {exc}")
-                continue
 
-        ids = _run_instances_once(c, cfg, disk_size, remaining)
-        if not ids:
-            logger.warning(f"no instances returned for {cfg.region_id}/{zone_id}")
-            continue
-
-        failed = _instances_failed_by_history(c, cfg.region_id, ids)
-        if failed:
-            logger.warning(
-                f"{len(failed)} instances reported failure in {cfg.region_id}/{zone_id}: {sorted(failed)}"
-            )
-        ok = [iid for iid in ids if iid not in failed]
-        successful_ids.extend(ok)
-        remaining = amount - len(successful_ids)
+        zone_instance_ids = _create_instance_in_zone(c, copy.deepcopy(cfg), zone_id, disk_size=disk_size, amount=remaining, allow_partial_success = False)
+        
+        region_instance_ids.extend(zone_instance_ids)
+        remaining = amount - len(region_instance_ids)
 
     if remaining > 0:
         logger.warning(
             f"not enough instances provisioned in {cfg.region_id}; remaining required instances: {remaining}"
         )
 
-    return successful_ids
+    return region_instance_ids
 
+def _create_instance_in_zone(c: EcsClient, cfg: EcsConfig, zone_id: str, * , amount: int = 1, disk_size: int = 40, allow_partial_success: bool = False) -> List[str]:
+    default_zone_id = cfg.zone_id
+    
+    if zone_id != default_zone_id:
+        cfg.zone_id = zone_id
+        cfg.v_switch_id = None
+        try:
+            ensure_vpc_and_vswitch(c, cfg, allow_create_vpc=True, allow_create_vswitch=True)
+        except Exception as exc:
+            logger.warning(f"failed to ensure vswitch for zone {zone_id}: {exc}")
+            return []
+
+    zone_instance_ids = []
+    
+    while len(zone_instance_ids) < amount:
+        target = min(amount - len(zone_instance_ids), RUN_INSTANCES_MAX_AMOUNT)
+        
+        ids = _run_instances_once(c, cfg, disk_size, amount=target, allow_partial_success = allow_partial_success)
+        
+        zone_instance_ids.extend(ids)
+        
+        if len(ids) < target:
+            break
+    
+    if not zone_instance_ids:
+        logger.warning(f"no instances returned for {cfg.region_id}/{zone_id}")
+        return []
+
+    failed = _instances_failed_by_history(c, cfg.region_id, ids)
+    if failed:
+        logger.warning(
+            f"{len(failed)} instances reported failure in {cfg.region_id}/{zone_id}: {sorted(failed)}"
+        )
+    return [iid for iid in ids if iid not in failed]
 
 def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str, allow_create: bool = True) -> None:
     resp = c.describe_key_pairs(ecs_models.DescribeKeyPairsRequest(region_id=r, key_pair_name=name))

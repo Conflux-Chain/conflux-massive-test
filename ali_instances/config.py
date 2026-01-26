@@ -17,6 +17,7 @@ DEFAULT_COMMON_TAG_KEY = "conflux-massive-test"
 DEFAULT_COMMON_TAG_VALUE = "true"
 DEFAULT_USER_TAG_KEY = "user"
 DEFAULT_USER_TAG_VALUE = "your_name"
+RUN_INSTANCES_MAX_AMOUNT = 100
 
 
 @dataclass
