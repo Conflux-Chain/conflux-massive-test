@@ -405,8 +405,12 @@ def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: in
         ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
         return list(ids or [])
     except Exception as exc:
+        e = traceback.format_exc()
+        if "OperationDenied.NoStock" in e:
+            logger.error(f"run_instances got no stock for {cfg.region_id}/{cfg.zone_id}: {exc}")
+            return []
         logger.error(f"run_instances failed for {cfg.region_id}/{cfg.zone_id}: {exc}")
-        logger.error(traceback.format_exc())
+        logger.error(e)
         return []
 
 
