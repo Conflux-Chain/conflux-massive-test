@@ -4,6 +4,7 @@ import ipaddress
 import json
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -349,19 +350,33 @@ def _disk_category(c: EcsClient, r: str, zone: str) -> Optional[str]:
     return None
 
 
-def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: int = 1) -> list[str]:
-    if not cfg.instance_type:
-        raise ValueError("instance_type required")
-    if not cfg.zone_id:
-        raise ValueError("zone_id required")
-    img = cfg.image_id or cfg.base_image_id
-    if not img:
-        raise ValueError("image_id required")
-    if not cfg.security_group_id:
-        raise ValueError("security_group_id required")
-    if not cfg.v_switch_id:
-        raise ValueError("v_switch_id required")
+def _history_event_failed(event: object) -> bool:
+    status = (getattr(event, "event_cycle_status", "") or "").lower()
+    if status == "failed":
+        return True
+    name = (getattr(event, "event_name", "") or "").lower()
+    etype = (getattr(event, "event_type", "") or "").lower()
+    return any(keyword in name for keyword in ("fail", "error")) or any(keyword in etype for keyword in ("fail", "error"))
 
+
+def _instances_failed_by_history(c: EcsClient, r: str, instance_ids: Sequence[str]) -> set[str]:
+    failed: set[str] = set()
+    for iid in instance_ids:
+        try:
+            resp = c.describe_instance_history_events(
+                ecs_models.DescribeInstanceHistoryEventsRequest(region_id=r, instance_id=iid)
+            )
+            events = []
+            if resp.body and getattr(resp.body, "instance_system_event_set", None):
+                events = getattr(resp.body.instance_system_event_set, "instance_system_event", None) or []
+            if any(_history_event_failed(e) for e in events or []):
+                failed.add(iid)
+        except Exception as exc:
+            logger.warning(f"failed to query instance history events for {iid}: {exc}")
+    return failed
+
+
+def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: int) -> list[str]:
     dcat = _disk_category(c, cfg.region_id, cfg.zone_id)
     disk = ecs_models.RunInstancesRequestSystemDisk(category=dcat, size=str(disk_size)) if dcat else None
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
@@ -369,7 +384,7 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
     req = ecs_models.RunInstancesRequest(
         region_id=cfg.region_id,
         zone_id=cfg.zone_id,
-        image_id=img,
+        image_id=cfg.image_id or cfg.base_image_id,
         instance_type=cfg.instance_type,
         security_group_id=cfg.security_group_id,
         v_switch_id=cfg.v_switch_id,
@@ -385,11 +400,66 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
         req.spot_strategy = cfg.spot_strategy
     if disk:
         req.system_disk = disk
-    resp = c.run_instances(req)
-    ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
-    if not ids:
-        raise RuntimeError("instance creation failed")
-    return ids
+    try:
+        resp = c.run_instances(req)
+        ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
+        return list(ids or [])
+    except Exception as exc:
+        logger.error(f"run_instances failed for {cfg.region_id}/{cfg.zone_id}: {exc}")
+        logger.error(traceback.format_exc())
+        return []
+
+
+def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: int = 1) -> list[str]:
+    if not cfg.instance_type:
+        raise ValueError("instance_type required")
+    if not cfg.zone_id:
+        raise ValueError("zone_id required")
+    img = cfg.image_id or cfg.base_image_id
+    if not img:
+        raise ValueError("image_id required")
+    if not cfg.security_group_id:
+        raise ValueError("security_group_id required")
+    if not cfg.v_switch_id:
+        raise ValueError("v_switch_id required")
+
+    zones = list_zones_for_instance_type(c, cfg.region_id, cfg.instance_type)
+    zone_candidates = [cfg.zone_id] + [z for z in zones if z != cfg.zone_id]
+
+    remaining = amount
+    successful_ids: list[str] = []
+    for zone_id in zone_candidates:
+        if remaining <= 0:
+            break
+        cfg.zone_id = zone_id
+        if zone_id != zone_candidates[0]:
+            cfg.v_switch_id = None
+            try:
+                ensure_vpc_and_vswitch(c, cfg, allow_create_vpc=True, allow_create_vswitch=True)
+            except Exception as exc:
+                logger.warning(f"failed to ensure vswitch for zone {zone_id}: {exc}")
+                continue
+
+        ids = _run_instances_once(c, cfg, disk_size, remaining)
+        if not ids:
+            logger.warning(f"no instances returned for {cfg.region_id}/{zone_id}")
+            continue
+
+        failed = _instances_failed_by_history(c, cfg.region_id, ids)
+        if failed:
+            logger.warning(
+                f"{len(failed)} instances reported failure in {cfg.region_id}/{zone_id}: {sorted(failed)}"
+            )
+        ok = [iid for iid in ids if iid not in failed]
+        successful_ids.extend(ok)
+        remaining = amount - len(successful_ids)
+
+    if remaining > 0:
+        logger.warning(
+            f"not enough instances provisioned in {cfg.region_id}; remaining required instances: {remaining}"
+        )
+
+    return successful_ids
 
 
 def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str, allow_create: bool = True) -> None:
