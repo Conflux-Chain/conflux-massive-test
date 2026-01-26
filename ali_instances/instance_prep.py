@@ -396,10 +396,6 @@ def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: in
         tag=tags,
         amount=amount,
     )
-    if cfg.min_amount_in_zone is not None:
-        min_amount = int(cfg.min_amount_in_zone)
-        min_amount = max(0, min_amount)
-        req.min_amount = min(min_amount, amount)
     if cfg.use_spot:
         req.spot_strategy = cfg.spot_strategy
     if disk:
@@ -409,7 +405,18 @@ def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: in
         ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
         return list(ids or [])
     except Exception as exc:
-        logger.error(f"run_instances failed for {cfg.region_id}/{cfg.zone_id}: {exc}")
+        logger.warning(
+            f"run_instances failed for {cfg.region_id}/{cfg.zone_id} without min_amount; retry with min_amount=1: {exc}"
+        )
+        logger.error(traceback.format_exc())
+
+    try:
+        req.min_amount = 1
+        resp = c.run_instances(req)
+        ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
+        return list(ids or [])
+    except Exception as exc:
+        logger.error(f"run_instances failed for {cfg.region_id}/{cfg.zone_id} with min_amount: {exc}")
         logger.error(traceback.format_exc())
         return []
 

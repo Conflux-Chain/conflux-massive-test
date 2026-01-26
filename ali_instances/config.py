@@ -34,7 +34,6 @@ class EcsConfig:
     base_image_id: Optional[str] = None
     image_id: Optional[str] = None
     instance_type: Optional[str] = None
-    min_amount_in_zone: Optional[int] = None
     min_cpu_cores: int = 4
     min_memory_gb: float = 8.0
     max_memory_gb: float = 8.0

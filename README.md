@@ -125,7 +125,6 @@ If neither source provides credentials, provisioning will raise an error.
 | `count` | Yes | **Total number of Conflux nodes** (instead of server instances) to start in this region |
 | `image` | No | Custom AMI id. If omitted, uses pre-built `conflux-docker-base` |
 | `security_group_id` | No | Existing security group. Created if omitted |
-| `min_amount` | No | Minimum instances to accept per RunInstances request (applies to all zones in this region) |
 | `zones` | No | Preferred availability zones |
 
 #### Instance type selection

@@ -134,8 +134,6 @@ def build_base_cfg(
     cfg.common_tag_value = "true"
     cfg.user_tag_value = user_tag
     cfg.security_group_id = region_cfg.get("security_group_id") or account_cfg.get("security_group_id")
-    if "min_amount_in_zone" in region_cfg:
-        cfg.min_amount_in_zone = int(region_cfg.get("min_amount_in_zone"))
     zones_cfg = region_cfg.get("zones") or []
     if len(zones_cfg) == 1:
         cfg.zone_id = zones_cfg[0].get("name") or cfg.zone_id
