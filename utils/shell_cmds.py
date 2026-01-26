@@ -3,6 +3,7 @@ import os
 import subprocess
 import time
 from typing import List
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -125,10 +126,21 @@ def inject_dockerhub_mirrors(
 ):
     if not mirrors:
         mirrors = [
-            "https://docker.mirrors.ustc.edu.cn",
-            "http://hub-mirror.c.163.com",
+            "https://docker.xuanyuan.me",
+            "https://docker.1ms.run",
+            "https://lispy.org",
         ]
-    daemon_config = json.dumps({"registry-mirrors": mirrors}, indent=2)
+    insecure_registries: List[str] = []
+    for mirror in mirrors:
+        parsed = urlparse(mirror)
+        if parsed.scheme == "http":
+            host = parsed.netloc or parsed.path
+            if host:
+                insecure_registries.append(host)
+    daemon_payload = {"registry-mirrors": mirrors}
+    if insecure_registries:
+        daemon_payload["insecure-registries"] = insecure_registries
+    daemon_config = json.dumps(daemon_payload, indent=2)
     cmd = (
         "set -e\n"
         "mkdir -p /etc/docker\n"

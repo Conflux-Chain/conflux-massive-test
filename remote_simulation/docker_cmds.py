@@ -63,5 +63,16 @@ def stop_all_nodes() -> str:
 def destory_all_nodes() -> str:
     return f"sudo docker ps -aq --filter name={CONTAINER_PREFIX} | xargs -r sudo docker rm -f && sudo rm -rf ~/log* && sudo rm -rf ~/output*"
 
-def pull_image():
-    return f"sudo docker pull {REMOTE_IMAGE_TAG} && sudo docker tag {REMOTE_IMAGE_TAG} {IMAGE_TAG}"
+def pull_image(retries: int = 3, delay_seconds: int = 10) -> str:
+    return (
+        "set -e; "
+        f"for i in $(seq 1 {retries}); do "
+        "  if sudo docker info >/dev/null 2>&1; then "
+        f"    if sudo docker pull {REMOTE_IMAGE_TAG} && sudo docker tag {REMOTE_IMAGE_TAG} {IMAGE_TAG}; then exit 0; fi; "
+        "  fi; "
+        "  if command -v systemctl >/dev/null 2>&1; then sudo systemctl restart docker; "
+        "  elif command -v service >/dev/null 2>&1; then sudo service docker restart; fi; "
+        f"  sleep {delay_seconds}; "
+        "done; "
+        "exit 1"
+    )
