@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -77,9 +78,11 @@ def cleanup_all_regions(
         "me-east-1",  
     ]
 
-    for region_id in regions:
+    def _cleanup_region(region_id: str) -> tuple[int, set[tuple[str, Optional[str]]]]:
         logger.info(f"cleanup region {region_id}")
         c = client(cfg.credentials, region_id, cfg.endpoint)
+        region_deleted = 0
+        region_pairs: set[tuple[str, Optional[str]]] = set()
 
         try:
             # Delete instances by tags
@@ -88,7 +91,7 @@ def cleanup_all_regions(
                 # record instances that have the common tag (regardless of user tag value)
                 tag_map = {t.tag_key: t.tag_value for t in tags if t.tag_key}
                 if tag_map.get(tag_filter.common_key) == tag_filter.common_value:
-                    observed_user_pairs.add((user_tag_key, tag_map.get(user_tag_key)))
+                    region_pairs.add((user_tag_key, tag_map.get(user_tag_key)))
 
                 if not tag_filter.matches(tags):
                     continue
@@ -96,7 +99,7 @@ def cleanup_all_regions(
                     continue
                 try:
                     delete_instance(c, region_id, inst.instance_id)
-                    total_deleted += 1
+                    region_deleted += 1
                     logger.info(f"deleted instance {inst.instance_id} in {region_id}")
                 except Exception as exc:
                     logger.warning(f"failed to delete instance {inst.instance_id}: {exc}")
@@ -125,7 +128,7 @@ def cleanup_all_regions(
             logger.warning(f"failed to list/delete security groups in {region_id}: {exc}")
 
         if not delete_network:
-            continue
+            return region_deleted, region_pairs
         # Best-effort cleanup of vpcs/vswitches with the same prefix
         # try-catch is needed
         try:
@@ -158,6 +161,19 @@ def cleanup_all_regions(
                     logger.warning(f"failed to delete vpc {vpc.vpc_id}: {exc}")
         except Exception as exc:
             logger.warning(f"failed to list/delete vpcs in {region_id}: {exc}")
+        return region_deleted, region_pairs
+
+    max_workers = min(8, max(1, len(regions)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_region = {executor.submit(_cleanup_region, region_id): region_id for region_id in regions}
+        for fut in as_completed(future_to_region):
+            region_id = future_to_region[fut]
+            try:
+                region_deleted, region_pairs = fut.result()
+                total_deleted += region_deleted
+                observed_user_pairs.update(region_pairs)
+            except Exception as exc:
+                logger.warning(f"cleanup region {region_id} failed: {exc}")
     # If we deleted nothing, print observed user tag values for instances that had the common tag
     if total_deleted == 0:
         if observed_user_pairs:
