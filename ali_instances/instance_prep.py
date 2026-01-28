@@ -453,42 +453,79 @@ def create_instance(
     remaining = amount
     region_instance_ids: list[str] = []
 
-    # 尝试在相同 zone 开所有节点
-    if amount <= RUN_INSTANCES_MAX_AMOUNT:
-        for zone_id in zone_candidates:
-            if remaining <= 0:
-                break
+    def _prepare_zone_cfg(zone_id: str) -> Optional[EcsRuntimeConfig]:
+        zone_cfg = copy.deepcopy(cfg)
+        if zone_id != zone_cfg.zone_id:
+            zone_cfg.zone_id = zone_id
+            zone_cfg.v_switch_id = None
+            try:
+                ensure_vpc_and_vswitch(c, zone_cfg, allow_create_vpc=True, allow_create_vswitch=True)
+            except Exception as exc:
+                logger.warning(f"failed to ensure vswitch for zone {zone_id}: {exc}")
+                return None
+        return zone_cfg
 
-            zone_instance_ids = _create_instance_in_zone(
-                c,
-                copy.deepcopy(cfg),
-                zone_id,
-                amount=remaining,
-                disk_size=disk_size,
-                allow_partial_success=False,
-                instance_types=types,
-            )
-            
-            region_instance_ids.extend(zone_instance_ids)
-            remaining = amount - len(region_instance_ids)
-
-    # 尝试在不同 zone 开节点
+    # 1) 优先使用同一个 zone 的 base 机器（不使用 min_amount）
+    single_zone_fulfilled = False
     for zone_id in zone_candidates:
         if remaining <= 0:
             break
+        zone_cfg = _prepare_zone_cfg(zone_id)
+        if not zone_cfg:
+            continue
+        request_amount = min(remaining, RUN_INSTANCES_MAX_AMOUNT)
+        zone_instance_ids = _run_instances_once(
+            c,
+            zone_cfg,
+            selected_type,
+            disk_size,
+            amount=request_amount,
+            allow_partial_success=False,
+        )
+        region_instance_ids.extend(zone_instance_ids)
+        remaining = amount - len(region_instance_ids)
+        if request_amount == amount and len(zone_instance_ids) >= request_amount:
+            single_zone_fulfilled = True
+            break
 
+    if single_zone_fulfilled or remaining <= 0:
+        return region_instance_ids
+
+    # 2) base 机器跨 zone 使用 min_amount=1 尝试凑足
+    for zone_id in zone_candidates:
+        if remaining <= 0:
+            break
         zone_instance_ids = _create_instance_in_zone(
             c,
             copy.deepcopy(cfg),
             zone_id,
             amount=remaining,
             disk_size=disk_size,
-            allow_partial_success=False,
-            instance_types=types,
+            allow_partial_success=True,
+            instance_types=[selected_type],
         )
-        
         region_instance_ids.extend(zone_instance_ids)
         remaining = amount - len(region_instance_ids)
+
+    # 3) 逐级尝试更高 weight 的机型（每个 zone，min_amount=1）
+    if remaining > 0 and len(types) > 1:
+        for instance_type in types[1:]:
+            if remaining <= 0:
+                break
+            for zone_id in zone_candidates:
+                if remaining <= 0:
+                    break
+                zone_instance_ids = _create_instance_in_zone(
+                    c,
+                    copy.deepcopy(cfg),
+                    zone_id,
+                    amount=remaining,
+                    disk_size=disk_size,
+                    allow_partial_success=True,
+                    instance_types=[instance_type],
+                )
+                region_instance_ids.extend(zone_instance_ids)
+                remaining = amount - len(region_instance_ids)
 
     if remaining > 0:
         logger.warning(
