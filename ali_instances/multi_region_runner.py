@@ -297,23 +297,20 @@ def zones_with_stock(
     return zones
 
 
-def build_region_plan(
+def filter_instance_types_for_region(
     region_client,
     region_cfg: RegionConfig,
     account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> Optional[RegionProvisionPlan]:
-    """Build a simple provisioning plan for a region.
+    """Filter instance types in a region to those with stock.
 
-    This function iterates over preferred instance types (from config
-    or account defaults) and checks per-type per-zone stock via
-    `zones_with_stock`. If a zone with stock is found for a type, we
-    compute how many hosts are needed to satisfy the requested node
-    count by dividing requested nodes by nodes_per_host and rounding
-    up (math.ceil). Returning a RegionProvisionPlan means we judged
-    that the region has sufficient stock for at least one host group
-    of the selected type; returning None indicates we found no
-    suitable type/zone with reported stock.
+    This function examines configured instance types for the region
+    (region-level or account-level) and removes any types that report
+    no stock via `DescribeAvailableResource`. If one or more types
+    remain in stock, it returns a small RegionProvisionPlan describing
+    the chosen zone, candidate types, and hosts_needed; otherwise it
+    returns None to indicate the region has no in-stock types.
     """
     region_name = region_cfg.name
     node_count = int(region_cfg.count)
@@ -323,30 +320,30 @@ def build_region_plan(
     preferred = preferred_zones(region_cfg)
     subnet_map = zone_subnet_map(region_cfg)
 
-    instance_type_candidates = [spec.name for spec in type_specs]
-
+    zones_by_type: Dict[str, List[str]] = {}
+    in_stock_specs: List[AliTypeSpec] = []
     for spec in type_specs:
-        # Check which zones report stock for this instance type.
         zones = zones_with_stock(region_client, region_name, spec.name, preferred)
         if not zones:
-            # No zones with stock for this type; try the next type.
             continue
-        # Choose the first acceptable zone. This is a simple heuristic
-        # — a more advanced solver could distribute across zones/types.
-        zone_id = zones[0]
-        # For judgement of capacity we compute how many hosts are needed
-        # to reach requested node count (nodes are packed into hosts).
-        hosts_needed = math.ceil(node_count / max(spec.nodes_per_host, 1))
-        return RegionProvisionPlan(
-            region_name=region_name,
-            instance_type_candidates=[spec.name] + [t for t in instance_type_candidates if t != spec.name],
-            nodes_per_host=spec.nodes_per_host,
-            hosts_needed=hosts_needed,
-            zone_id=zone_id,
-            v_switch_id=subnet_map.get(zone_id),
-        )
-    # No suitable type/zone found with stock -> region considered out of stock.
-    return None
+        zones_by_type[spec.name] = zones
+        in_stock_specs.append(spec)
+
+    instance_type_candidates = [spec.name for spec in in_stock_specs]
+    if not in_stock_specs:
+        return None
+
+    chosen = in_stock_specs[0]
+    zone_id = zones_by_type[chosen.name][0]
+    hosts_needed = math.ceil(node_count / max(chosen.nodes_per_host, 1))
+    return RegionProvisionPlan(
+        region_name=region_name,
+        instance_type_candidates=instance_type_candidates,
+        nodes_per_host=chosen.nodes_per_host,
+        hosts_needed=hosts_needed,
+        zone_id=zone_id,
+        v_switch_id=subnet_map.get(zone_id),
+    )
 
 
 def confirm_force_continue(missing_regions: List[str]) -> bool:
@@ -358,31 +355,31 @@ def confirm_force_continue(missing_regions: List[str]) -> bool:
     raise RuntimeError("provision cancelled by user")
 
 
-def build_plans_parallel(
+def filter_instance_types_parallel(
     *,
     active: List[RegionConfig],
     creds: AliCredentials,
     account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> Dict[str, Optional[RegionProvisionPlan]]:
-    async def _build_all_plans() -> Dict[str, Optional[RegionProvisionPlan]]:
-        async def _plan_for(region_cfg: RegionConfig):
+    async def _filter_all_regions() -> Dict[str, Optional[RegionProvisionPlan]]:
+        async def _filter_for(region_cfg: RegionConfig):
             region_name = region_cfg.name
             try:
                 region_client = client(creds, region_name)
                 plan = await asyncio.to_thread(
-                    build_region_plan, region_client, region_cfg, account_cfg, hardware_defaults
+                    filter_instance_types_for_region, region_client, region_cfg, account_cfg, hardware_defaults
                 )
                 return region_name, plan
             except Exception as exc:
                 logger.warning(f"failed to query stock for {region_name}: {exc}")
                 return region_name, None
 
-        tasks = [_plan_for(region_cfg) for region_cfg in active]
+        tasks = [_filter_for(region_cfg) for region_cfg in active]
         results = await asyncio.gather(*tasks)
         return {name: plan for name, plan in results}
 
-    return asyncio.run(_build_all_plans())
+    return asyncio.run(_filter_all_regions())
 
 
 def wait_instance_ready(region_client, cfg: EcsRuntimeConfig, instance_id: str) -> str:
@@ -627,11 +624,11 @@ def provision_aliyun_hosts(
                     regions_used.append(region_name)
 
         if active and not network_only:
-            # Build provisioning plans for all active regions in parallel.
-            # Each plan inspects the region's stock via DescribeAvailableResource
-            # (performed inside build_region_plan). We call build_region_plan in
-            # separate threads so slow network/API calls don't block other checks.
-            plans = build_plans_parallel(
+            # Filter instance types with stock for all active regions in parallel.
+            # Each filter inspects the region's stock via DescribeAvailableResource
+            # (performed inside filter_instance_types_for_region). We call the
+            # parallel filter in separate threads so slow network/API calls don't block other checks.
+            available_types = filter_instance_types_parallel(
                 active=active,
                 creds=creds,
                 account_cfg=account_cfg,
@@ -642,7 +639,7 @@ def provision_aliyun_hosts(
                 tasks = []
                 for region_cfg in active:
                     region_name = region_cfg.name
-                    plan = plans.get(region_name)
+                    plan = available_types.get(region_name)
                     if plan is None:
                         logger.warning(f"{region_name} 无可用库存，跳过该区域")
                         continue
@@ -670,7 +667,7 @@ def provision_aliyun_hosts(
                     )
                 return await asyncio.gather(*tasks)
 
-            missing_regions = [name for name, plan in plans.items() if plan is None]
+            missing_regions = [name for name, plan in available_types.items() if plan is None]
             if missing_regions and not confirm_force_continue(missing_regions):
                 raise RuntimeError("provision cancelled by user")
             for region_name, region_hosts in asyncio.run(_provision_all_regions()):
