@@ -75,13 +75,13 @@ class RemoteNode:
         signature = self.rpc.test_getNodeId(int_to_bytes(challenge))
         return convert_to_nodeid(signature, challenge)
     
-    def _wait_for_phase(self, phases, wait_time=10):
-        sleep_time = 0.1
+    def _wait_for_phase(self, phases, wait_time=30):
+        sleep_time = 1
         retry = 0
         max_retry = wait_time / sleep_time
 
         while self.rpc.debug_currentSyncPhase() not in phases and retry <= max_retry:
-            time.sleep(0.1)
+            time.sleep(sleep_time)
             retry += 1
 
         if retry > max_retry:
@@ -103,9 +103,38 @@ class RemoteNodeRPC:
     timeout: int = 60
 
     def _call(self, method, *args):
+        """Send a JSON-RPC request with retries on HTTP 502 (Bad Gateway).
+
+        Retries up to 3 times with exponential backoff when a 502 is encountered
+        either via the response http status or an exception message.
+        """
+        max_retries = 3
+        delay = 2.0
         request = Request(method, *args)
-        response: Response = self.client.send(request, timeout=self.timeout)
-        return response.data.result
+        for attempt in range(1, max_retries + 1):
+            try:
+                response: Response = self.client.send(request, timeout=self.timeout)
+                # Some client implementations expose the HTTP status on the response
+                http_status = getattr(response, "http_status", None) or getattr(response, "status", None) or getattr(response, "status_code", None)
+                if http_status == 502:
+                    raise ReceivedErrorResponseError(f"HTTP {http_status}")
+                return response.data.result
+            except ReceivedErrorResponseError as e:
+                # If it's a 502, retry; otherwise re-raise
+                if attempt < max_retries and ("502" in str(e) or "Bad Gateway" in str(e)):
+                    logger.debug(f"JSON-RPC 502 encountered for {method}, retry {attempt}/{max_retries} after {delay}s: {e}")
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise
+            except Exception as e:
+                # Some network/HTTP libs embed the status in the exception message
+                if attempt < max_retries and ("502" in str(e) or "Bad Gateway" in str(e)):
+                    logger.debug(f"Transient 502 error for {method}, retry {attempt}/{max_retries} after {delay}s: {e}")
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise
     
     @property
     def addr(self):

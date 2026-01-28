@@ -338,7 +338,8 @@ def wait_instance_ready(region_client, cfg: EcsConfig, instance_id: str) -> str:
             start_instance(region_client, instance_id)
         except Exception as exc:
             logger.warning(f"start_instance failed for {instance_id}: {exc}. Will wait for instance to become Running.")
-    allocate_public_ip(region_client, cfg.region_id, instance_id, cfg.poll_interval, cfg.wait_timeout)
+    # Aliyun automatically allocates ip with `RunInstances` if bandwith is specified
+    # allocate_public_ip(region_client, cfg.region_id, instance_id, cfg.poll_interval, cfg.wait_timeout)
     return wait_running(region_client, cfg.region_id, instance_id, cfg.poll_interval, cfg.wait_timeout)
 
 
@@ -452,7 +453,7 @@ def provision_region_batch(
     instance_ids = create_instance(
         region_client,
         cfg,
-        disk_size=100,
+        disk_size=40,
         amount=plan.hosts_needed,
         instance_types=plan.instance_type_candidates,
     )
@@ -477,10 +478,10 @@ def provision_region_batch(
                     )
                 )
             except Exception as exc:
-                logger.warning(f"等待实例 {iid} 就绪失败: {exc}")
+                logger.warning(f"等待 {region_name} 实例 {iid} 就绪失败: {exc}")
                 failed_iids.append(iid)
     if failed_iids:
-        logger.warning(f"{len(failed_iids)} 个实例未就绪: {failed_iids}")
+        logger.warning(f"{region_name} {len(failed_iids)} 个实例未就绪: {failed_iids}")
 
     return region_name, region_hosts
 

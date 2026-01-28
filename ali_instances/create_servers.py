@@ -140,6 +140,7 @@ def main() -> None:
 
     timestamp = generate_timestamp()
     log_dir = root / "logs" / timestamp
+    logger.info(f"{len(hosts)} Aliyun hosts provisioned")
     write_inventory(hosts, timestamp, log_dir, root)
     if args.network_only:
         logger.success(

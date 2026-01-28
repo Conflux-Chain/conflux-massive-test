@@ -416,7 +416,7 @@ def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: in
 def create_instance(
     c: EcsClient,
     cfg: EcsConfig,
-    disk_size: int = 40,
+    disk_size: int = 20,
     amount: int = 1,
     instance_types: Optional[Sequence[str]] = None,
 ) -> list[str]:
@@ -493,7 +493,7 @@ def _create_instance_in_zone(
     zone_id: str,
     *,
     amount: int = 1,
-    disk_size: int = 40,
+    disk_size: int = 20,
     allow_partial_success: bool = False,
     instance_types: Optional[Sequence[str]] = None,
 ) -> List[str]:

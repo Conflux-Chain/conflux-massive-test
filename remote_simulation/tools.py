@@ -39,7 +39,7 @@ def check_nodes_synced(executor: ThreadPoolExecutor, nodes: List[RemoteNode]):
     if len(rare_blocks_info) > 0:
         logger.debug("出现次数不超过5的区块及其节点:")
         for (block_hash, cnt, node_ids) in rare_blocks_info:
-            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {",".join(node_ids)}")
+            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {','.join(node_ids)}")
     
     most_common = Counter(best_blocks).most_common(1)
     if not most_common:
