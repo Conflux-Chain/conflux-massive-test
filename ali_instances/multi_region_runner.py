@@ -5,7 +5,7 @@ import asyncio
 import json
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 import traceback
@@ -44,6 +44,46 @@ class AliTypeSpec:
 
 
 @dataclass
+class TypeConfig:
+    name: str
+    nodes: Optional[int] = None
+
+
+@dataclass
+class ZoneConfig:
+    name: Optional[str] = None
+    subnet: Optional[str] = None
+
+
+@dataclass
+class RegionConfig:
+    name: str
+    count: int = 0
+    image: Optional[str] = None
+    base_image_name: Optional[str] = None
+    security_group_id: Optional[str] = None
+    zones: List[ZoneConfig] = field(default_factory=list)
+    type: Optional[List[TypeConfig]] = None
+
+
+@dataclass
+class AccountConfig:
+    access_key_id: str = ""
+    access_key_secret: str = ""
+    user_tag: Optional[str] = None
+    type: Optional[List[TypeConfig]] = None
+    regions: List[RegionConfig] = field(default_factory=list)
+    image: Optional[str] = None
+    base_image_name: Optional[str] = None
+    security_group_id: Optional[str] = None
+
+
+@dataclass
+class AliyunConfig:
+    aliyun: List[AccountConfig] = field(default_factory=list)
+
+
+@dataclass
 class RegionProvisionPlan:
     region_name: str
     instance_type: str
@@ -73,47 +113,99 @@ def resolve_nodes_per_host(type_name: str, nodes: Optional[int], defaults: Dict[
 
 
 def resolve_aliyun_types(
-    region_cfg: Dict,
-    account_cfg: Dict,
+    region_cfg: RegionConfig,
+    account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> List[AliTypeSpec]:
-    types_cfg = region_cfg.get("type") or account_cfg.get("type") or [{"name": "ecs.g8i.xlarge"}]
+    types_cfg = region_cfg.type or account_cfg.type or [TypeConfig(name="ecs.g8i.xlarge")]
     specs: List[AliTypeSpec] = []
     for item in types_cfg:
-        name = item["name"]
-        raw_nodes = item.get("nodes")
+        name = item.name
+        raw_nodes = item.nodes
         nodes = int(raw_nodes) if raw_nodes is not None else None
         nodes_per_host = resolve_nodes_per_host(name, nodes, hardware_defaults)
         specs.append(AliTypeSpec(name=name, nodes_per_host=nodes_per_host))
     return specs
 
 
-def preferred_zones(region_cfg: Dict) -> Optional[List[str]]:
-    zones_cfg = region_cfg.get("zones")
+def preferred_zones(region_cfg: RegionConfig) -> Optional[List[str]]:
+    zones_cfg = region_cfg.zones
     if not zones_cfg:
         return None
-    return [z["name"] for z in zones_cfg if "name" in z]
+    return [z.name for z in zones_cfg if z.name]
 
 
-def zone_subnet_map(region_cfg: Dict) -> Dict[str, str]:
-    zones_cfg = region_cfg.get("zones") or []
+def zone_subnet_map(region_cfg: RegionConfig) -> Dict[str, str]:
+    zones_cfg = region_cfg.zones or []
     mapping: Dict[str, str] = {}
     for z in zones_cfg:
-        name = z.get("name")
-        subnet = z.get("subnet")
+        name = z.name
+        subnet = z.subnet
         if name and subnet:
             mapping[name] = subnet
     return mapping
 
 
-def load_config(config_path: Path, hardware_path: Path) -> tuple[Dict, Dict[str, int]]:
-    config = load_json(config_path)
+def _parse_type_list(items: Optional[List[Dict]]) -> Optional[List[TypeConfig]]:
+    if not items:
+        return None
+    return [TypeConfig(name=item["name"], nodes=item.get("nodes")) for item in items]
+
+
+def _parse_zones(items: Optional[List[Dict]]) -> List[ZoneConfig]:
+    if not items:
+        return []
+    return [ZoneConfig(name=item.get("name"), subnet=item.get("subnet")) for item in items]
+
+
+def _parse_regions(items: Optional[List[Dict]]) -> List[RegionConfig]:
+    if not items:
+        return []
+    regions: List[RegionConfig] = []
+    for item in items:
+        regions.append(
+            RegionConfig(
+                name=item["name"],
+                count=int(item.get("count", 0)),
+                image=item.get("image"),
+                base_image_name=item.get("base_image_name"),
+                security_group_id=item.get("security_group_id"),
+                zones=_parse_zones(item.get("zones")),
+                type=_parse_type_list(item.get("type")),
+            )
+        )
+    return regions
+
+
+def _parse_accounts(items: Optional[List[Dict]]) -> List[AccountConfig]:
+    if not items:
+        return []
+    accounts: List[AccountConfig] = []
+    for item in items:
+        accounts.append(
+            AccountConfig(
+                access_key_id=item.get("access_key_id", ""),
+                access_key_secret=item.get("access_key_secret", ""),
+                user_tag=item.get("user_tag"),
+                type=_parse_type_list(item.get("type")),
+                regions=_parse_regions(item.get("regions")),
+                image=item.get("image"),
+                base_image_name=item.get("base_image_name"),
+                security_group_id=item.get("security_group_id"),
+            )
+        )
+    return accounts
+
+
+def load_config(config_path: Path, hardware_path: Path) -> tuple[AliyunConfig, Dict[str, int]]:
+    raw_config = load_json(config_path)
+    config = AliyunConfig(aliyun=_parse_accounts(raw_config.get("aliyun")))
     hardware_defaults = load_hardware_defaults(hardware_path)
     return config, hardware_defaults
 
 
-def active_regions(regions: Iterable[Dict]) -> List[Dict]:
-    return [r for r in regions if int(r.get("count", 0)) > 0]
+def active_regions(regions: Iterable[RegionConfig]) -> List[RegionConfig]:
+    return [r for r in regions if int(r.count) > 0]
 
 
 def build_base_cfg(
@@ -123,8 +215,8 @@ def build_base_cfg(
     prefix: str,
     common_tag: str,
     user_tag: str,
-    region_cfg: Dict,
-    account_cfg: Dict,
+    region_cfg: RegionConfig,
+    account_cfg: AccountConfig,
 ) -> EcsConfig:
     cfg = EcsConfig(credentials=creds, region_id=region_name)
     cfg.ssh_username = "root"
@@ -135,37 +227,37 @@ def build_base_cfg(
     cfg.common_tag_key = common_tag
     cfg.common_tag_value = "true"
     cfg.user_tag_value = user_tag
-    cfg.security_group_id = region_cfg.get("security_group_id") or account_cfg.get("security_group_id")
-    zones_cfg = region_cfg.get("zones") or []
+    cfg.security_group_id = region_cfg.security_group_id or account_cfg.security_group_id
+    zones_cfg = region_cfg.zones or []
     if len(zones_cfg) == 1:
-        cfg.zone_id = zones_cfg[0].get("name") or cfg.zone_id
-        cfg.v_switch_id = zones_cfg[0].get("subnet") or cfg.v_switch_id
+        cfg.zone_id = zones_cfg[0].name or cfg.zone_id
+        cfg.v_switch_id = zones_cfg[0].subnet or cfg.v_switch_id
     return cfg
 
 
 def ensure_images_for_regions(
-    regions: List[Dict],
-    account_cfg: Dict,
+    regions: List[RegionConfig],
+    account_cfg: AccountConfig,
     creds: AliCredentials,
 ) -> Dict[str, str]:
     image_ids_by_region: Dict[str, str] = {}
     image_name_groups: Dict[str, List[str]] = {}
     for region_cfg in regions:
-        region_name = region_cfg["name"]
-        image_id = region_cfg.get("image") or account_cfg.get("image")
+        region_name = region_cfg.name
+        image_id = region_cfg.image or account_cfg.image
         if image_id:
             image_ids_by_region[region_name] = image_id
             continue
         base_image_name = (
-            region_cfg.get("base_image_name")
-            or account_cfg.get("base_image_name")
+            region_cfg.base_image_name
+            or account_cfg.base_image_name
             or DEFAULT_IMAGE_NAME
         )
         image_name_groups.setdefault(base_image_name, []).append(region_name)
 
     if image_name_groups:
         cfg_template = EcsConfig(credentials=creds)
-        all_region_names = [r["name"] for r in regions]
+        all_region_names = [r.name for r in regions]
         for image_name, region_list in image_name_groups.items():
             image_ids_by_region.update(
                 ensure_images_in_regions(
@@ -237,8 +329,8 @@ def zones_with_stock(
 
 def build_region_plan(
     region_client,
-    region_cfg: Dict,
-    account_cfg: Dict,
+    region_cfg: RegionConfig,
+    account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> Optional[RegionProvisionPlan]:
     """Build a simple provisioning plan for a region.
@@ -253,8 +345,8 @@ def build_region_plan(
     of the selected type; returning None indicates we found no
     suitable type/zone with reported stock.
     """
-    region_name = region_cfg["name"]
-    node_count = int(region_cfg.get("count", 0))
+    region_name = region_cfg.name
+    node_count = int(region_cfg.count)
     if node_count <= 0:
         return None
     type_specs = resolve_aliyun_types(region_cfg, account_cfg, hardware_defaults)
@@ -299,14 +391,14 @@ def confirm_force_continue(missing_regions: List[str]) -> bool:
 
 def build_plans_parallel(
     *,
-    active: List[Dict],
+    active: List[RegionConfig],
     creds: AliCredentials,
-    account_cfg: Dict,
+    account_cfg: AccountConfig,
     hardware_defaults: Dict[str, int],
 ) -> Dict[str, Optional[RegionProvisionPlan]]:
     async def _build_all_plans() -> Dict[str, Optional[RegionProvisionPlan]]:
-        async def _plan_for(region_cfg: Dict):
-            region_name = region_cfg["name"]
+        async def _plan_for(region_cfg: RegionConfig):
+            region_name = region_cfg.name
             try:
                 region_client = client(creds, region_name, None)
                 plan = await asyncio.to_thread(
@@ -346,8 +438,8 @@ def wait_instance_ready(region_client, cfg: EcsConfig, instance_id: str) -> str:
 def ensure_region_network(
     *,
     region_client,
-    region_cfg: Dict,
-    account_cfg: Dict,
+    region_cfg: RegionConfig,
+    account_cfg: AccountConfig,
     creds: AliCredentials,
     prefix: str,
     common_tag: str,
@@ -355,7 +447,7 @@ def ensure_region_network(
     allow_create_vpc: bool,
     allow_create_vswitch: bool,
 ) -> tuple[str, List[HostSpec]]:
-    region_name = region_cfg["name"]
+    region_name = region_cfg.name
     logger.info(f"准备在 {region_name} 创建 VPC/VSwitch")
 
     cfg = build_base_cfg(
@@ -368,11 +460,11 @@ def ensure_region_network(
         account_cfg=account_cfg,
     )
 
-    zones_cfg = region_cfg.get("zones") or []
+    zones_cfg = region_cfg.zones or []
     if zones_cfg:
         for zone_cfg in zones_cfg:
-            cfg.zone_id = zone_cfg.get("name")
-            cfg.v_switch_id = zone_cfg.get("subnet")
+            cfg.zone_id = zone_cfg.name
+            cfg.v_switch_id = zone_cfg.subnet
             ensure_vpc_and_vswitch(
                 region_client,
                 cfg,
@@ -396,8 +488,8 @@ def ensure_region_network(
 def provision_region_batch(
     *,
     region_client,
-    region_cfg: Dict,
-    account_cfg: Dict,
+    region_cfg: RegionConfig,
+    account_cfg: AccountConfig,
     plan: RegionProvisionPlan,
     image_id: str,
     creds: AliCredentials,
@@ -502,9 +594,9 @@ def ports_for_nodes(max_nodes_per_host: int) -> List[int]:
     return sorted(set(ports))
 
 
-def resolve_aliyun_credentials(cfg: Dict) -> AliCredentials:
-    ak = cfg.get("access_key_id", "").strip()
-    sk = cfg.get("access_key_secret", "").strip()
+def resolve_aliyun_credentials(cfg: AccountConfig) -> AliCredentials:
+    ak = cfg.access_key_id.strip()
+    sk = cfg.access_key_secret.strip()
     if ak and sk:
         return AliCredentials(ak, sk)
     return EcsConfig().credentials
@@ -523,7 +615,7 @@ def provision_aliyun_hosts(
 ) -> Tuple[List[HostSpec], List[CleanupTarget]]:
     config, hardware_defaults = load_config(config_path, hardware_path)
 
-    aliyun_cfgs = config.get("aliyun", [])
+    aliyun_cfgs = config.aliyun
     if not aliyun_cfgs:
         raise RuntimeError("missing aliyun config")
 
@@ -531,9 +623,9 @@ def provision_aliyun_hosts(
     cleanup_targets: List[CleanupTarget] = []
 
     for account_cfg in aliyun_cfgs:
-        regions = account_cfg.get("regions", [])
+        regions = account_cfg.regions
         creds = resolve_aliyun_credentials(account_cfg)
-        user_tag = account_cfg.get("user_tag", DEFAULT_USER_TAG_VALUE)
+        user_tag = account_cfg.user_tag or DEFAULT_USER_TAG_VALUE
         prefix = f"{common_tag}-{user_tag}"
         regions_used: List[str] = []
 
@@ -547,7 +639,7 @@ def provision_aliyun_hosts(
                 tasks = [
                     asyncio.to_thread(
                         ensure_region_network,
-                        region_client=client(creds, region_cfg["name"], None),
+                        region_client=client(creds, region_cfg.name, None),
                         region_cfg=region_cfg,
                         account_cfg=account_cfg,
                         creds=creds,
@@ -580,7 +672,7 @@ def provision_aliyun_hosts(
             async def _provision_all_regions() -> List[tuple[str, List[HostSpec]]]:
                 tasks = []
                 for region_cfg in active:
-                    region_name = region_cfg["name"]
+                    region_name = region_cfg.name
                     plan = plans.get(region_name)
                     if plan is None:
                         logger.warning(f"{region_name} 无可用库存，跳过该区域")
