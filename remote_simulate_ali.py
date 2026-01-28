@@ -32,6 +32,7 @@ from ali_instances.create_servers import load_host_specs, generate_timestamp
 
 HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=200)
 NODE_CONNECT_POOL = ThreadPoolExecutor(max_workers=200)
+COUNTER = AtomicCounter()
 
 
 def _test_say_hello(
@@ -55,42 +56,41 @@ def _test_say_hello(
     return False
 
 
-def _launch_node(ip_address: str, index: int, counter: AtomicCounter) -> RemoteNode | None:
+def _launch_node(host: HostSpec, index: int) -> RemoteNode | None:
     try:
-        shell_cmds.ssh(ip_address, "root", docker_cmds.launch_node(index))
+        shell_cmds.ssh(host.ip, "root", docker_cmds.launch_node(index))
     except Exception as exc:
-        logger.info(f"实例 {ip_address} 节点 {index} 启动失败：{exc}")
+        logger.info(f"{host.region} 实例 {host.ip} 节点 {index} 启动失败：{exc}")
         return None
 
-    if not _test_say_hello(remote_rpc_port(index), ip_address):
-        logger.info(f"实例 {ip_address} 节点 {index} 无法建立连接")
+    if not _test_say_hello(remote_rpc_port(index), host.ip):
+        logger.info(f"{host.region} 实例 {host.ip} 节点 {index} 无法建立连接")
         return None
 
-    node = RemoteNode(host=ip_address, index=index)
+    node = RemoteNode(host_spec=host, index=index)
     if not node.wait_for_ready():
-        logger.info(f"实例 {ip_address} 节点 {index} 无法进入就绪状态")
+        logger.warning(f"{host.region} 实例 {host.ip} 节点 {index} 无法进入就绪状态")
         return None
 
-    cnt = counter.increment()
+    cnt = COUNTER.increment()
     logger.info(f"节点 {node.id} 启动成功，节点累计 {cnt}")
     return node
 
 
-def _execute_instance(ip_address: str, nodes_per_host: int, config_file, pull_docker_image: bool) -> List[RemoteNode]:
+def _execute_instance(host: HostSpec, nodes_per_host: int, config_file, pull_docker_image: bool) -> List[RemoteNode]:
     try:
-        shell_cmds.scp(config_file.path, ip_address, "root", "~/config.toml")
-        logger.debug(f"实例 {ip_address} 同步配置完成")
+        shell_cmds.scp(config_file.path, host.ip, "root", "~/config.toml")
+        logger.debug(f"实例 {host.ip} 同步配置完成")
         if pull_docker_image:
-            shell_cmds.ssh(ip_address, "root", docker_cmds.pull_image())
-            logger.debug(f"实例 {ip_address} 拉取 docker 镜像完成")
-        shell_cmds.ssh(ip_address, "root", docker_cmds.destory_all_nodes())
-        logger.debug(f"实例 {ip_address} 状态初始化完成，开始启动节点")
+            shell_cmds.ssh(host.ip, "root", docker_cmds.pull_image())
+            logger.debug(f"实例 {host.ip} 拉取 docker 镜像完成")
+        shell_cmds.ssh(host.ip, "root", docker_cmds.destory_all_nodes())
+        logger.debug(f"实例 {host.ip} 状态初始化完成，开始启动节点")
     except Exception as exc:
-        logger.warning(f"无法初始化实例 {ip_address}: {exc}")
+        logger.warning(f"{host.region} 无法初始化实例 {host.ip}: {exc}")
         return []
 
-    counter = AtomicCounter()
-    launch_future = NODE_CONNECT_POOL.map(lambda idx: _launch_node(ip_address, idx, counter), range(nodes_per_host))
+    launch_future = NODE_CONNECT_POOL.map(lambda idx: _launch_node(host, idx), range(nodes_per_host))
     return [n for n in launch_future if n is not None]
 
 
@@ -98,7 +98,7 @@ def launch_remote_nodes_root(hosts: List[HostSpec], config_file, pull_docker_ima
     logger.info("开始启动所有 Conflux 节点")
 
     def _run_host(host: HostSpec):
-        return _execute_instance(host.ip, host.nodes_per_host, config_file, pull_docker_image)
+        return _execute_instance(host, host.nodes_per_host, config_file, pull_docker_image)
 
     launch_future = HOST_CONNECT_POOL.map(_run_host, hosts)
     nodes = list(chain.from_iterable(launch_future))
@@ -120,9 +120,9 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
     def _stop_and_collect(node: RemoteNode) -> int:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
-            shell_cmds.scp(str(script_local), node.host, "root", remote_script)
-            shell_cmds.ssh(node.host, "root", ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
-            shell_cmds.ssh(node.host, "root", ["rm", "-f", remote_script])
+            shell_cmds.scp(str(script_local), node.host_spec.ip, "root", remote_script)
+            shell_cmds.ssh(node.host_spec.ip, "root", ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
+            shell_cmds.ssh(node.host_spec.ip, "root", ["rm", "-f", remote_script])
             cnt1 = counter1.increment()
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
             local_node_path = str(Path(local_path) / node.id)
@@ -130,7 +130,7 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
             shell_cmds.rsync_download(
                 f"/root/output{node.index}/",
                 local_node_path,
-                node.host,
+                node.host_spec.ip,
                 user="root",
             )
             cnt2 = counter2.increment()
@@ -171,7 +171,7 @@ if __name__ == "__main__":
 
     simulation_config = SimulateOptions(
         target_nodes=total_nodes,
-        nodes_per_host=max_nodes_per_host,
+        # nodes_per_host=max_nodes_per_host,
         num_blocks=1000,
         connect_peers=8,
         target_tps=17000,
@@ -197,8 +197,12 @@ if __name__ == "__main__":
 
     nodes = launch_remote_nodes_root(hosts, config_file, pull_docker_image=True)
     if len(nodes) < simulation_config.target_nodes:
-        raise RuntimeError("Not all nodes started")
-    logger.success("所有节点已启动，准备连接拓扑网络")
+        # raise RuntimeError("Not all nodes started")
+        logger.warning(f"启动了{len(nodes)}个节点，少于预期的{simulation_config.target_nodes}个节点")
+        logger.warning("部分节点启动失败，继续进行测试")
+    else:
+        logger.success("所有节点已启动")
+    logger.info("准备连接拓扑网络")
 
     topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers)
     for k, v in topology.peers.items():

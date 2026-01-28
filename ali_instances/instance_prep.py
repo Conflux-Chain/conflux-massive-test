@@ -417,8 +417,14 @@ def _run_instances_once(c: EcsClient, cfg: EcsConfig, disk_size: int, amount: in
         return []
 
 
-def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: int = 1) -> list[str]:
-    if not cfg.instance_type:
+def create_instance(
+    c: EcsClient,
+    cfg: EcsConfig,
+    disk_size: int = 20,
+    amount: int = 1,
+    instance_types: Optional[Sequence[str]] = None,
+) -> list[str]:
+    if not cfg.instance_type and not instance_types:
         raise ValueError("instance_type required")
     if not cfg.zone_id:
         raise ValueError("zone_id required")
@@ -429,6 +435,11 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
         raise ValueError("security_group_id required")
     if not cfg.v_switch_id:
         raise ValueError("v_switch_id required")
+
+    types = [t for t in (instance_types or [cfg.instance_type]) if t]
+    if not types:
+        raise ValueError("instance_type required")
+    cfg.instance_type = cfg.instance_type or types[0]
 
     zones = list_zones_for_instance_type(c, cfg.region_id, cfg.instance_type)
     zone_candidates = [cfg.zone_id] + [z for z in zones if z != cfg.zone_id]
@@ -442,7 +453,15 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
             if remaining <= 0:
                 break
 
-            zone_instance_ids = _create_instance_in_zone(c, copy.deepcopy(cfg), zone_id, disk_size=disk_size, amount=remaining, allow_partial_success = False)
+            zone_instance_ids = _create_instance_in_zone(
+                c,
+                copy.deepcopy(cfg),
+                zone_id,
+                amount=remaining,
+                disk_size=disk_size,
+                allow_partial_success=False,
+                instance_types=types,
+            )
             
             region_instance_ids.extend(zone_instance_ids)
             remaining = amount - len(region_instance_ids)
@@ -452,7 +471,15 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
         if remaining <= 0:
             break
 
-        zone_instance_ids = _create_instance_in_zone(c, copy.deepcopy(cfg), zone_id, disk_size=disk_size, amount=remaining, allow_partial_success = False)
+        zone_instance_ids = _create_instance_in_zone(
+            c,
+            copy.deepcopy(cfg),
+            zone_id,
+            amount=remaining,
+            disk_size=disk_size,
+            allow_partial_success=False,
+            instance_types=types,
+        )
         
         region_instance_ids.extend(zone_instance_ids)
         remaining = amount - len(region_instance_ids)
@@ -464,7 +491,16 @@ def create_instance(c: EcsClient, cfg: EcsConfig, disk_size: int = 40, amount: i
 
     return region_instance_ids
 
-def _create_instance_in_zone(c: EcsClient, cfg: EcsConfig, zone_id: str, * , amount: int = 1, disk_size: int = 40, allow_partial_success: bool = False) -> List[str]:
+def _create_instance_in_zone(
+    c: EcsClient,
+    cfg: EcsConfig,
+    zone_id: str,
+    *,
+    amount: int = 1,
+    disk_size: int = 20,
+    allow_partial_success: bool = False,
+    instance_types: Optional[Sequence[str]] = None,
+) -> List[str]:
     default_zone_id = cfg.zone_id
     
     if zone_id != default_zone_id:
@@ -476,28 +512,34 @@ def _create_instance_in_zone(c: EcsClient, cfg: EcsConfig, zone_id: str, * , amo
             logger.warning(f"failed to ensure vswitch for zone {zone_id}: {exc}")
             return []
 
-    zone_instance_ids = []
-    
-    while len(zone_instance_ids) < amount:
-        target = min(amount - len(zone_instance_ids), RUN_INSTANCES_MAX_AMOUNT)
-        
-        ids = _run_instances_once(c, cfg, disk_size, amount=target, allow_partial_success = allow_partial_success)
-        
-        zone_instance_ids.extend(ids)
-        
-        if len(ids) < target:
+    types = [t for t in (instance_types or [cfg.instance_type]) if t]
+    if not types:
+        logger.warning(f"no instance types available for {cfg.region_id}/{zone_id}")
+        return []
+
+    zone_instance_ids: list[str] = []
+
+    for instance_type in types:
+        if len(zone_instance_ids) >= amount:
             break
-    
+        cfg.instance_type = instance_type
+        while len(zone_instance_ids) < amount:
+            target = min(amount - len(zone_instance_ids), RUN_INSTANCES_MAX_AMOUNT)
+            ids = _run_instances_once(c, cfg, disk_size, amount=target, allow_partial_success=allow_partial_success)
+            zone_instance_ids.extend(ids)
+            if len(ids) < target:
+                break
+
     if not zone_instance_ids:
         logger.warning(f"no instances returned for {cfg.region_id}/{zone_id}")
         return []
 
-    failed = _instances_failed_by_history(c, cfg.region_id, ids)
+    failed = _instances_failed_by_history(c, cfg.region_id, zone_instance_ids)
     if failed:
         logger.warning(
             f"{len(failed)} instances reported failure in {cfg.region_id}/{zone_id}: {sorted(failed)}"
         )
-    return [iid for iid in ids if iid not in failed]
+    return [iid for iid in zone_instance_ids if iid not in failed]
 
 def ensure_keypair(c: EcsClient, r: str, name: str, key_path: str, allow_create: bool = True) -> None:
     resp = c.describe_key_pairs(ecs_models.DescribeKeyPairsRequest(region_id=r, key_pair_name=name))

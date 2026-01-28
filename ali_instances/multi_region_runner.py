@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -46,6 +47,7 @@ class AliTypeSpec:
 class RegionProvisionPlan:
     region_name: str
     instance_type: str
+    instance_type_candidates: List[str]
     nodes_per_host: int
     hosts_needed: int
     zone_id: str
@@ -259,6 +261,8 @@ def build_region_plan(
     preferred = preferred_zones(region_cfg)
     subnet_map = zone_subnet_map(region_cfg)
 
+    instance_type_candidates = [spec.name for spec in type_specs]
+
     for spec in type_specs:
         # Check which zones report stock for this instance type.
         zones = zones_with_stock(region_client, region_name, spec.name, preferred)
@@ -274,6 +278,7 @@ def build_region_plan(
         return RegionProvisionPlan(
             region_name=region_name,
             instance_type=spec.name,
+            instance_type_candidates=instance_type_candidates,
             nodes_per_host=spec.nodes_per_host,
             hosts_needed=hosts_needed,
             zone_id=zone_id,
@@ -333,7 +338,8 @@ def wait_instance_ready(region_client, cfg: EcsConfig, instance_id: str) -> str:
             start_instance(region_client, instance_id)
         except Exception as exc:
             logger.warning(f"start_instance failed for {instance_id}: {exc}. Will wait for instance to become Running.")
-    allocate_public_ip(region_client, cfg.region_id, instance_id, cfg.poll_interval, cfg.wait_timeout)
+    # Aliyun automatically allocates ip with `RunInstances` if bandwith is specified
+    # allocate_public_ip(region_client, cfg.region_id, instance_id, cfg.poll_interval, cfg.wait_timeout)
     return wait_running(region_client, cfg.region_id, instance_id, cfg.poll_interval, cfg.wait_timeout)
 
 
@@ -444,22 +450,39 @@ def provision_region_batch(
     # Create all required hosts in a single RunInstances request by
     # passing `amount=plan.hosts_needed`. This results in one batch API
     # call per region/zone and avoids creating instances one-by-one.
-    instance_ids = create_instance(region_client, cfg, disk_size=100, amount=plan.hosts_needed)
+    instance_ids = create_instance(
+        region_client,
+        cfg,
+        disk_size=40,
+        amount=plan.hosts_needed,
+        instance_types=plan.instance_type_candidates,
+    )
     region_hosts: List[HostSpec] = []
-    for iid in instance_ids:
-        # Wait for instance to become ready and acquire a public IP.
-        ip = wait_instance_ready(region_client, cfg, iid)
-        region_hosts.append(
-            HostSpec(
-                ip=ip,
-                nodes_per_host=plan.nodes_per_host,
-                ssh_user=cfg.ssh_username,
-                ssh_key_path=str(Path(cfg.ssh_private_key_path).expanduser()),
-                provider="aliyun",
-                region=region_name,
-                instance_id=iid,
-            )
-        )
+    failed_iids: List[str] = []
+    max_workers = min(32, max(1, len(instance_ids)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_iid = {executor.submit(wait_instance_ready, region_client, cfg, iid): iid for iid in instance_ids}
+        for fut in as_completed(future_to_iid):
+            iid = future_to_iid[fut]
+            try:
+                ip = fut.result()
+                region_hosts.append(
+                    HostSpec(
+                        ip=ip,
+                        nodes_per_host=plan.nodes_per_host,
+                        ssh_user=cfg.ssh_username,
+                        ssh_key_path=str(Path(cfg.ssh_private_key_path).expanduser()),
+                        provider="aliyun",
+                        region=region_name,
+                        instance_id=iid,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(f"等待 {region_name} 实例 {iid} 就绪失败: {exc}")
+                failed_iids.append(iid)
+    if failed_iids:
+        logger.warning(f"{region_name} {len(failed_iids)} 个实例未就绪: {failed_iids}")
+
     return region_name, region_hosts
 
 
