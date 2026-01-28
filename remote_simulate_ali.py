@@ -60,16 +60,16 @@ def _launch_node(host: HostSpec, index: int) -> RemoteNode | None:
     try:
         shell_cmds.ssh(host.ip, "root", docker_cmds.launch_node(index))
     except Exception as exc:
-        logger.info(f"实例 {host.ip} 节点 {index} 启动失败：{exc}")
+        logger.info(f"{host.region} 实例 {host.ip} 节点 {index} 启动失败：{exc}")
         return None
 
     if not _test_say_hello(remote_rpc_port(index), host.ip):
-        logger.info(f"实例 {host.ip} 节点 {index} 无法建立连接")
+        logger.info(f"{host.region} 实例 {host.ip} 节点 {index} 无法建立连接")
         return None
 
     node = RemoteNode(host_spec=host, index=index)
     if not node.wait_for_ready():
-        logger.warning(f"实例 {host.ip} 节点 {index} 无法进入就绪状态")
+        logger.warning(f"{host.region} 实例 {host.ip} 节点 {index} 无法进入就绪状态")
         return None
 
     cnt = COUNTER.increment()
@@ -87,7 +87,7 @@ def _execute_instance(host: HostSpec, nodes_per_host: int, config_file, pull_doc
         shell_cmds.ssh(host.ip, "root", docker_cmds.destory_all_nodes())
         logger.debug(f"实例 {host.ip} 状态初始化完成，开始启动节点")
     except Exception as exc:
-        logger.warning(f"无法初始化实例 {host.ip}: {exc}")
+        logger.warning(f"{host.region} 无法初始化实例 {host.ip}: {exc}")
         return []
 
     launch_future = NODE_CONNECT_POOL.map(lambda idx: _launch_node(host, idx), range(nodes_per_host))
