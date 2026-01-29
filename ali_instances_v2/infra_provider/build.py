@@ -29,8 +29,9 @@ class InfraProvider:
 
 
 
-def get_zone_ids_in_region(c: EcsClient, region_id: str) -> List[str]:
-    rep = c.describe_zones(ecs_models.DescribeZonesRequest(
+def get_zone_ids_in_region(c: ClientFactory, region_id: str) -> List[str]:
+    client = c.build(region_id)
+    rep = client.describe_zones(ecs_models.DescribeZonesRequest(
         region_id=region_id, verbose=False))
     return [zone.zone_id for zone in rep.body.zones.zone]
 
@@ -57,7 +58,7 @@ class InfraRequest:
     allow_create: bool
 
     @classmethod
-    def from_config(cls, config: AliyunRequestConfig, allow_create=False) -> 'InfraRequest':
+    def from_aliyun_config(cls, config: AliyunRequestConfig, allow_create=False) -> 'InfraRequest':
         infra_tag = f"conflux-massive-test-{config.user_tag}"
         return InfraRequest(region_ids=[r.name for r in config.regions],
                             vpc_name=infra_tag,
@@ -75,9 +76,7 @@ class InfraRequest:
 
         return InfraProvider(regions={reg.id: reg for reg in regions})
 
-    def _ensure_region(self, client_factory: ClientFactory, region_id: str) -> RegionInfo:
-        client = client_factory.build(region_id)
-
+    def _ensure_region(self, client: ClientFactory, region_id: str) -> RegionInfo:
         zone_ids = get_zone_ids_in_region(client, region_id)
         image_id = self._ensure_image_in_region(client, region_id)
 
@@ -93,7 +92,7 @@ class InfraRequest:
 
         return RegionInfo(id=region_id, zones=zones, image_id=image_id, security_group_id=security_group_id, vpc_id=vpc_id, key_pair_name=self.key_pair.key_pair_name, key_path=self.key_pair.key_path)
 
-    def _ensure_image_in_region(self, client: EcsClient, region_id: str):
+    def _ensure_image_in_region(self, client: ClientFactory, region_id: str):
         images = _find(get_images_in_region(
             client, region_id, self.image_name), lambda im: im.image_name == self.image_name)
         if images is not None:
@@ -102,7 +101,7 @@ class InfraRequest:
             raise Exception(
                 f"Image {self.image_name} not found in region {region_id}")
 
-    def _ensure_vpc_in_region(self, client: EcsClient, region_id: str) -> str:
+    def _ensure_vpc_in_region(self, client: ClientFactory, region_id: str) -> str:
         vpc = _find(get_vpcs_in_region(client, region_id),
                     lambda vpc: vpc.vpc_name == self.vpc_name)
         if vpc is not None:
@@ -120,7 +119,7 @@ class InfraRequest:
             raise Exception(
                 f"VPC {self.vpc_name} not found in region {region_id}")
 
-    def _ensure_security_group_in_region(self, client: EcsClient, region_id: str, vpc_id: str) -> str:
+    def _ensure_security_group_in_region(self, client: ClientFactory, region_id: str, vpc_id: str) -> str:
         sg = _find(get_security_groups_in_region(client, region_id, vpc_id),
                    lambda sg: sg.security_group_name == self.security_group_name)
         if sg is not None:
@@ -139,7 +138,7 @@ class InfraRequest:
             raise Exception(
                 f"Security group {self.security_group_name} not found in {region_id}/{vpc_id}")
 
-    def _ensure_key_pair_in_region(self, client: EcsClient, region_id: str):
+    def _ensure_key_pair_in_region(self, client: ClientFactory, region_id: str):
         key_pair = get_keypairs_in_region(
             client, region_id, self.key_pair.key_pair_name)
 
@@ -163,7 +162,7 @@ class InfraRequest:
                 raise Exception(
                     f"Key pair {self.key_pair.key_pair_name} has inconsistent finger print in region {region_id}")
 
-    def _ensure_v_switches_in_region(self, client: EcsClient, region_id: str, zone_ids: List[str], vpc_id: str) -> Dict[str, ZoneInfo]:
+    def _ensure_v_switches_in_region(self, client: ClientFactory, region_id: str, zone_ids: List[str], vpc_id: str) -> Dict[str, ZoneInfo]:
         v_switches = get_v_switchs_in_region(client, region_id, vpc_id)
 
         zones: List[ZoneInfo] = []

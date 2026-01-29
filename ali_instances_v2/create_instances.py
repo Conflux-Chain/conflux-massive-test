@@ -16,9 +16,9 @@ from host_spec import save_hosts
 
 
 def create_instances(config: AliyunRequestConfig, allow_create: bool, infra_only: bool, output_json: str):
-    request = InfraRequest.from_config(config, allow_create=allow_create)
+    request = InfraRequest.from_aliyun_config(config, allow_create=allow_create)
     provider = request.ensure_infras(client_factory)
-    logger.success("Infra check pass")
+    logger.success("Aliyun infra check pass")
 
     if infra_only:
         return

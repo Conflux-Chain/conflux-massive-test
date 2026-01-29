@@ -4,6 +4,7 @@ from typing import List, Optional
 from alibabacloud_ecs20140526.models import DescribeKeyPairsResponseBodyKeyPairsKeyPair, DescribeKeyPairsRequest, ImportKeyPairRequest
 from alibabacloud_ecs20140526.client import Client as EcsClient
 
+from ali_instances_v2.client_factory import ClientFactory
 from utils.wait_until import wait_until
 
 from .crypto import get_fingerprint_from_key, get_public_key_body
@@ -34,12 +35,14 @@ class KeyPairRequestConfig:
     
 
 
-def get_keypairs_in_region(c: EcsClient, region_id: str, key_pair_name: str) -> Optional[KeyPairInfo]:
+def get_keypairs_in_region(c: ClientFactory, region_id: str, key_pair_name: str) -> Optional[KeyPairInfo]:
+    client = c.build(region_id)
+
     result = []
     
     page_number = 1
     while True:
-        rep = c.describe_key_pairs(DescribeKeyPairsRequest(region_id=region_id, key_pair_name=key_pair_name, page_number=page_number, page_size=50))
+        rep = client.describe_key_pairs(DescribeKeyPairsRequest(region_id=region_id, key_pair_name=key_pair_name, page_number=page_number, page_size=50))
         result.extend([KeyPairInfo.from_api_response(v_switch) for v_switch in rep.body.key_pairs.key_pair])
         if rep.body.total_count <= page_number * 50:
             break
@@ -52,8 +55,10 @@ def get_keypairs_in_region(c: EcsClient, region_id: str, key_pair_name: str) -> 
     else:
         raise Exception(f"Unexpected: multiple result for key pair {key_pair_name} in {region_id}")
 
-def create_keypair(c: EcsClient, region_id: str, key_pair: KeyPairRequestConfig):
-    c.import_key_pair(ImportKeyPairRequest(region_id=region_id, key_pair_name=key_pair.key_pair_name, public_key_body=key_pair.public_key))
+def create_keypair(c: ClientFactory, region_id: str, key_pair: KeyPairRequestConfig):
+    client = c.build(region_id)
+    
+    client.import_key_pair(ImportKeyPairRequest(region_id=region_id, key_pair_name=key_pair.key_pair_name, public_key_body=key_pair.public_key))
     
     def _available():
         remote_key_pair = get_keypairs_in_region(c, region_id, key_pair.key_pair_name)

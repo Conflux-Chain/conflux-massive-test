@@ -4,6 +4,8 @@ from typing import List
 from alibabacloud_ecs20140526.models import DescribeVSwitchesResponseBodyVSwitchesVSwitch, DescribeVSwitchesRequest, CreateVSwitchRequest
 from alibabacloud_ecs20140526.client import Client as EcsClient
 
+from ali_instances_v2.client_factory import ClientFactory
+
 from .vpc import DEFAULT_VPC_CIDR
 from utils.wait_until import wait_until
 
@@ -29,12 +31,14 @@ class VSwitchInfo:
     
 
 
-def get_v_switchs_in_region(c: EcsClient, region_id: str, vpc_id: str) -> List[VSwitchInfo]:
+def get_v_switchs_in_region(c: ClientFactory, region_id: str, vpc_id: str) -> List[VSwitchInfo]:
+    client = c.build(region_id)
+
     result = []
     
     page_number = 1
     while True:
-        rep = c.describe_vswitches(DescribeVSwitchesRequest(region_id=region_id, vpc_id=vpc_id, page_number=page_number, page_size=50))
+        rep = client.describe_vswitches(DescribeVSwitchesRequest(region_id=region_id, vpc_id=vpc_id, page_number=page_number, page_size=50))
         result.extend([VSwitchInfo.from_api_response(v_switch) for v_switch in rep.body.v_switches.v_switch])
         if rep.body.total_count <= page_number * 50:
             break
@@ -62,14 +66,16 @@ def allocate_vacant_cidr_block(occupied_blocks: List[str], prefix: int = 24, vpc
 
 
 
-def create_v_switch(c: EcsClient, region_id: str, zone_id: str, vpc_id: str, v_switch_name: str, cidr_block: str):
-    rep = c.create_vswitch(CreateVSwitchRequest(region_id=region_id, vpc_id=vpc_id, zone_id=zone_id, v_switch_name=v_switch_name, cidr_block=cidr_block))
+def create_v_switch(c: ClientFactory, region_id: str, zone_id: str, vpc_id: str, v_switch_name: str, cidr_block: str):
+    client = c.build(region_id)
+    
+    rep = client.create_vswitch(CreateVSwitchRequest(region_id=region_id, vpc_id=vpc_id, zone_id=zone_id, v_switch_name=v_switch_name, cidr_block=cidr_block))
     v_switch_id = rep.body.v_switch_id
     
     assert type(v_switch_id) is str
     
     def _available():
-        resp = c.describe_vswitches(DescribeVSwitchesRequest(region_id=region_id, v_switch_id=v_switch_id))
+        resp = client.describe_vswitches(DescribeVSwitchesRequest(region_id=region_id, v_switch_id=v_switch_id))
         v_switches = resp.body.v_switches.v_switch
         return len(v_switches) > 0 and v_switches[0].status == "Available"
     
