@@ -12,7 +12,7 @@ from .vpc import create_vpc, get_vpcs_in_region
 from .zone import get_zone_ids_in_region
 from .instance import create_instances_in_zone, describe_instance_status
 
-from ..create_instances.interface import IEcsClient
+from ..create_instances.provider_interface import IEcsClient
 from ..create_instances.instance_config import InstanceConfig
 from ..create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
 

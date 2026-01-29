@@ -60,7 +60,7 @@ ssh_key_path = "./keys/ssh-key.pem"
 
 [[aws.regions]]
 name = "us-west-2"
-count = 1
+count = 3
 
 [[aws.instance_types]]
 name = "m6i.2xlarge"

@@ -9,14 +9,14 @@ from queue import Queue
 
 from loguru import logger
 
-from .interface import IEcsClient
+from .provider_interface import IEcsClient
 from .types import Instance, InstanceType
 from utils.wait_until import WaitUntilTimeoutError, wait_until
 
 SSH_CHECK_POOL = ThreadPoolExecutor(max_workers=2000)
 
 
-class RegionCreateManager:
+class InstanceVerifier:
     region_id: str
     target_nodes: int
     request_nodes: int

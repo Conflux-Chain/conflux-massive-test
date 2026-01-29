@@ -12,7 +12,7 @@ class CandidateInstanceType(BaseModel):
     name: str
     nodes: int
 
-class CloudRequestConfig(BaseModel):
+class CloudConfig(BaseModel):
     provider: str
     default_user_name: str
     user_tag: str
@@ -21,11 +21,11 @@ class CloudRequestConfig(BaseModel):
     regions: List[Region] = []
     instance_types: List[CandidateInstanceType] = []
 
-class RequestConfig(BaseModel):
-    aliyun: CloudRequestConfig
-    aws: CloudRequestConfig
+class ProvisionConfig(BaseModel):
+    aliyun: CloudConfig
+    aws: CloudConfig
 
 if __name__=="__main__":
     with open("request_config.toml", "rb") as f:
         data = tomllib.load(f)
-    print(RequestConfig(**data))
+    print(ProvisionConfig(**data))

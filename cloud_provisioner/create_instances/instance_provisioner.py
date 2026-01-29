@@ -1,0 +1,80 @@
+from itertools import product
+import math
+import threading
+from typing import List
+
+from loguru import logger
+
+from .instance_config import InstanceConfig
+from .provider_interface import IEcsClient
+from .types import InstanceType, RegionInfo
+from cloud_provisioner.host_spec import HostSpec
+
+from .instance_verifier import InstanceVerifier
+
+
+def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, *, region_info: RegionInfo, instance_types: List[InstanceType], nodes: int, ssh_user: str, provider: str):
+    verifier = InstanceVerifier(region_info.id, nodes)
+    thread1 = threading.Thread(
+        target=verifier.describe_instances_loop, args=(client,))
+    thread1.start()
+    thread2 = threading.Thread(target=verifier.wait_for_ssh_loop)
+    thread2.start()
+
+    default_instance_type = instance_types[0]
+    amount = math.ceil(nodes / default_instance_type.nodes)
+    _try_create_in_single_zone(
+        client, verifier, cfg, region_info, default_instance_type, amount)
+
+    # 排列组合所有区域，可以在这里配置更复杂的尝试策略
+    zone_plan = product(instance_types, region_info.zones.values())
+
+    instance_type, zone_info = next(zone_plan)
+
+    while True:
+        rest_nodes = verifier.get_rest_nodes()
+        if rest_nodes <= 0:
+            logger.success(f"Region {region_info.id} launch complete")
+            break
+
+        instance_ids = client.create_instances_in_zone(
+            cfg, region_info, zone_info, instance_type, amount, allow_partial_success=True)
+
+        if len(instance_ids) < amount:
+            # 当前实例组合可用已经耗尽，尝试下一组
+            try:
+                instance_type, zone_info = next(zone_plan)
+            except StopIteration:
+                # 全部实例组合耗尽，等待 pending 的结果
+                rest_nodes = verifier.get_rest_nodes(wait_for_pendings=True)
+
+                if rest_nodes > 0:
+                    logger.error(
+                        f"Cannot launch enough nodes, request {nodes}, actual {verifier.ready_nodes}")
+                break
+
+    ready_instances = verifier.copy_ready_instances()
+    return [HostSpec(ip=ip,
+                     nodes_per_host=instance.type.nodes,
+                     ssh_user=ssh_user,
+                     ssh_key_path=region_info.key_path,
+                     provider=provider,
+                     region=region_info.id,
+                     instance_id=instance.instance_id)
+            for (instance, ip) in ready_instances]
+
+
+def _try_create_in_single_zone(client: IEcsClient, verifier: InstanceVerifier, cfg: InstanceConfig, region_info: RegionInfo, instance_type: InstanceType, amount: int):
+    for zone_info in region_info.zones.values():
+        ids = client.create_instances_in_zone(
+            cfg, region_info, zone_info, instance_type, amount)
+        if len(ids) == 0:
+            continue
+        elif len(ids) < amount:
+            # TODO: 关闭部分成功的 instance?
+            logger.warning(
+                f"Only partial create instance success, even if minimum required ({region_info.id}/{zone_info.id})")
+        else:
+            verifier.submit_pending_instances(ids, instance_type)
+            # 无论这些实例是否都成功，不会再走 create_in_single_zone 的逻辑
+            return

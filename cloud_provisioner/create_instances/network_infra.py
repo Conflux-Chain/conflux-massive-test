@@ -5,8 +5,8 @@ from typing import Callable, Dict, List, TypeVar
 from loguru import logger
 
 from .types import KeyPairRequestConfig, RegionInfo, ZoneInfo
-from .interface import IEcsClient
-from cloud_provisioner.request_config import CloudRequestConfig
+from .provider_interface import IEcsClient
+from cloud_provisioner.create_instances.provision_config import CloudConfig
 
 DEFAULT_VPC_CIDR = "10.0.0.0/16"
 
@@ -31,7 +31,7 @@ class InfraRequest:
     allow_create: bool
 
     @classmethod
-    def from_config(cls, config: CloudRequestConfig, allow_create=False) -> 'InfraRequest':
+    def from_config(cls, config: CloudConfig, allow_create=False) -> 'InfraRequest':
         infra_tag = f"conflux-massive-test-{config.user_tag}"
         return InfraRequest(region_ids=[r.name for r in config.regions],
                             provider=config.provider,
@@ -148,7 +148,6 @@ class InfraRequest:
             v_switch = _find(v_switches, lambda vs: vs.v_switch_name ==
                              self.v_switch_name and vs.zone_id == zone_id)
             if v_switch is not None:
-                # TODO: check status availbility
                 if v_switch.status.lower() != "available":
                     raise Exception(
                         f"v-switch {self.v_switch_name} in region {region_id} zone {zone_id} has unexpected status: {v_switch.status}")
