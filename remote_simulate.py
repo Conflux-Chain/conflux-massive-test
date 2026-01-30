@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Run a Conflux simulation on Aliyun.
+"""Run a Conflux simulation on provisioned cloud instances.
 
-This script provisions hosts, launches nodes, runs the experiment, and collects logs.
-Configuration is read from instance-region.json.
+This script reads an inventory (by default `hosts.json`), launches nodes, runs the experiment, and collects logs.
 """
 import json
 import os
@@ -15,7 +14,8 @@ from typing import List
 import requests
 from loguru import logger
 
-from ali_instances.host_spec import HostSpec
+from cloud_provisioner.host_spec import HostSpec, load_hosts
+import datetime
 from remote_simulation import docker_cmds
 from remote_simulation.block_generator import generate_blocks_async
 from remote_simulation.config_builder import ConfluxOptions, SimulateOptions, generate_config_file
@@ -27,7 +27,6 @@ from remote_simulation.tools import init_tx_gen, wait_for_nodes_synced
 from utils.counter import AtomicCounter
 from utils.wait_until import WaitUntilTimeoutError
 from utils import shell_cmds
-from ali_instances.create_servers import load_host_specs, generate_timestamp
 
 
 HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=200)
@@ -147,14 +146,14 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
 
 if __name__ == "__main__":
     root = Path(__file__).resolve().parent
-    servers_json = root / "ali_servers.json"
+    servers_json = root / "hosts.json"
+
     if not servers_json.exists():
         raise FileNotFoundError(f"missing {servers_json}")
 
-    raw = json.loads(servers_json.read_text())
-    hosts = load_host_specs(raw)
+    hosts = load_hosts(str(servers_json))
     if not hosts:
-        raise RuntimeError("no hosts found in ali_servers.json")
+        raise RuntimeError("no hosts found in hosts.json")
 
     default_key = root / "keys" / "ssh-key.pem"
     if "SSH_KEY_PATH" not in os.environ and default_key.exists():
@@ -190,9 +189,7 @@ if __name__ == "__main__":
     config_file = generate_config_file(simulation_config, node_config)
     logger.success(f"完成配置文件 {config_file.path}")
 
-    log_path = raw.get("log_dir") if isinstance(raw, dict) else None
-    if not log_path:
-        log_path = f"logs/{generate_timestamp()}"
+    log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     nodes = launch_remote_nodes_root(hosts, config_file, pull_docker_image=True)
