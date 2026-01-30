@@ -170,6 +170,18 @@ if __name__ == "__main__":
         else:
             logger.info("Proceeding despite mismatched prefix due to --yes flag")
 
+    # Destructive confirmation when empty prefix is provided (matches all instances subject to common tag)
+    # python -m cloud_provisioner.cleanup_instances --user-prefix ""
+    if args.user_prefix == "":
+        logger.warning("Empty --user-prefix will match ALL instances (filtered only by common tag: '%s=%s')!", DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE)
+        if not args.yes:
+            resp = input("Proceed anyway? [y/N]: ").strip().lower()
+            if resp not in ("y", "yes"):
+                logger.info("Aborting cleanup due to user cancellation")
+                sys.exit(1)
+        else:
+            logger.info("Proceeding with empty prefix due to --yes flag")
+
     aliyun_factory = AliyunClient.load_from_env()
     aws_factory = AwsClient.new()
     user_prefix = args.user_prefix
