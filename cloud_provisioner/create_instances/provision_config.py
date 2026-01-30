@@ -6,7 +6,7 @@ import tomllib
 
 class Region(BaseModel):
     name: str
-    count: int
+    count: int = 0
 
 class CandidateInstanceType(BaseModel):
     name: str
@@ -20,6 +20,10 @@ class CloudConfig(BaseModel):
     ssh_key_path: str
     regions: List[Region] = []
     instance_types: List[CandidateInstanceType] = []
+    
+    @property
+    def total_nodes(self):
+        return sum([region.count for region in self.regions])
 
 class ProvisionConfig(BaseModel):
     aliyun: CloudConfig

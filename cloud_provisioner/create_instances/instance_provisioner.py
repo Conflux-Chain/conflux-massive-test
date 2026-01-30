@@ -6,7 +6,7 @@ from typing import List
 from loguru import logger
 
 from .instance_config import InstanceConfig
-from .provider_interface import IEcsClient
+from ..provider_interface import IEcsClient
 from .types import InstanceType, RegionInfo
 from cloud_provisioner.host_spec import HostSpec
 

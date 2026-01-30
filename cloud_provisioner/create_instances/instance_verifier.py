@@ -9,7 +9,7 @@ from queue import Queue
 
 from loguru import logger
 
-from .provider_interface import IEcsClient
+from ..provider_interface import IEcsClient
 from .types import Instance, InstanceType
 from utils.wait_until import WaitUntilTimeoutError, wait_until
 

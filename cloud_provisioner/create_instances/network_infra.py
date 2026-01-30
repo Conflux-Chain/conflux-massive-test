@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, TypeVar
 from loguru import logger
 
 from .types import KeyPairRequestConfig, RegionInfo, ZoneInfo
-from .provider_interface import IEcsClient
+from ..provider_interface import IEcsClient
 from cloud_provisioner.create_instances.provision_config import CloudConfig
 
 DEFAULT_VPC_CIDR = "10.0.0.0/16"
