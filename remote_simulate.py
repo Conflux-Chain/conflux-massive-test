@@ -57,7 +57,7 @@ def _test_say_hello(
 
 def _launch_node(host: HostSpec, index: int) -> RemoteNode | None:
     try:
-        shell_cmds.ssh(host.ip, "root", docker_cmds.launch_node(index))
+        shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.launch_node(index))
     except Exception as exc:
         logger.info(f"{host.region} 实例 {host.ip} 节点 {index} 启动失败：{exc}")
         return None
@@ -78,12 +78,12 @@ def _launch_node(host: HostSpec, index: int) -> RemoteNode | None:
 
 def _execute_instance(host: HostSpec, nodes_per_host: int, config_file, pull_docker_image: bool) -> List[RemoteNode]:
     try:
-        shell_cmds.scp(config_file.path, host.ip, "root", "~/config.toml")
+        shell_cmds.scp(config_file.path, host.ip, host.ssh_user, "~/config.toml")
         logger.debug(f"实例 {host.ip} 同步配置完成")
         if pull_docker_image:
-            shell_cmds.ssh(host.ip, "root", docker_cmds.pull_image())
+            shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image())
             logger.debug(f"实例 {host.ip} 拉取 docker 镜像完成")
-        shell_cmds.ssh(host.ip, "root", docker_cmds.destory_all_nodes())
+        shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.destory_all_nodes())
         logger.debug(f"实例 {host.ip} 状态初始化完成，开始启动节点")
     except Exception as exc:
         logger.warning(f"{host.region} 无法初始化实例 {host.ip}: {exc}")
@@ -93,7 +93,7 @@ def _execute_instance(host: HostSpec, nodes_per_host: int, config_file, pull_doc
     return [n for n in launch_future if n is not None]
 
 
-def launch_remote_nodes_root(hosts: List[HostSpec], config_file, pull_docker_image: bool = True) -> List[RemoteNode]:
+def launch_remote_nodes(hosts: List[HostSpec], config_file, pull_docker_image: bool = True) -> List[RemoteNode]:
     logger.info("开始启动所有 Conflux 节点")
 
     def _run_host(host: HostSpec):
@@ -106,7 +106,7 @@ def launch_remote_nodes_root(hosts: List[HostSpec], config_file, pull_docker_ima
     return nodes
 
 
-def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
+def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     total_cnt = len(nodes)
     counter1 = AtomicCounter()
     counter2 = AtomicCounter()
@@ -119,9 +119,9 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
     def _stop_and_collect(node: RemoteNode) -> int:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
-            shell_cmds.scp(str(script_local), node.host_spec.ip, "root", remote_script)
-            shell_cmds.ssh(node.host_spec.ip, "root", ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
-            shell_cmds.ssh(node.host_spec.ip, "root", ["rm", "-f", remote_script])
+            shell_cmds.scp(str(script_local), node.host_spec.ip, node.host_spec.ssh_user, remote_script)
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_script])
             cnt1 = counter1.increment()
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
             local_node_path = str(Path(local_path) / node.id)
@@ -130,7 +130,7 @@ def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
                 f"/root/output{node.index}/",
                 local_node_path,
                 node.host_spec.ip,
-                user="root",
+                user=node.host_spec.ssh_user,
             )
             cnt2 = counter2.increment()
             logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
-    nodes = launch_remote_nodes_root(hosts, config_file, pull_docker_image=True)
+    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=True)
     if len(nodes) < simulation_config.target_nodes:
         # raise RuntimeError("Not all nodes started")
         logger.warning(f"启动了{len(nodes)}个节点，少于预期的{simulation_config.target_nodes}个节点")
@@ -237,6 +237,6 @@ if __name__ == "__main__":
         logger.warning("部分节点没有完全同步，准备采集日志数据")
 
     logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
-    collect_logs_root(nodes, log_path)
+    collect_logs(nodes, log_path)
     logger.success(f"日志收集完毕，路径 {os.path.abspath(log_path)}")
 
