@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from loguru import logger
 import argparse
 
-from .args_check import check_user_prefix_with_config_file, check_empty_user_prefix
+from cloud_provisioner.args_check import check_user_prefix_with_config_file, check_empty_user_prefix
 from ..aliyun_provider.client_factory import AliyunClient
 from ..aws_provider.client_factory import AwsClient
 from .types import InstanceInfoWithTag
@@ -59,7 +59,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     check_user_prefix_with_config_file(args.config, args.user_prefix, args.yes)
-    check_empty_user_prefix(args.user_prefix, args.yes)
+    check_empty_user_prefix(args.user_prefix, args.yes, f"Empty --user-prefix will match ALL instances (filtered only by common tag: '{DEFAULT_COMMON_TAG_KEY}={DEFAULT_COMMON_TAG_VALUE}')!")
 
     aliyun_client = AliyunClient.load_from_env()
     aws_client = AwsClient.new()

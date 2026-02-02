@@ -3,7 +3,8 @@ import tomllib
 import sys
 
 from cloud_provisioner.create_instances.provision_config import ProvisionConfig
-from ..create_instances.instance_config import DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
+from cloud_provisioner.create_instances.instance_config import DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
+
 
 def check_user_prefix_with_config_file(config_file: str, user_prefix: str, assume_yes: bool):
     try:
@@ -13,12 +14,12 @@ def check_user_prefix_with_config_file(config_file: str, user_prefix: str, assum
     except FileNotFoundError:
         logger.error(f"{config_file} not found in cwd, aborting")
         sys.exit(1)
-        
+
     mismatches = []
-    
+
     if not config.aliyun.user_tag.startswith(user_prefix):
         mismatches.append(("aliyun", config.aliyun.user_tag))
-        
+
     if not config.aws.user_tag.startswith(user_prefix):
         mismatches.append(("aws", config.aws.user_tag))
 
@@ -34,13 +35,16 @@ def check_user_prefix_with_config_file(config_file: str, user_prefix: str, assum
                 sys.exit(1)
         else:
             logger.info("Proceeding despite mismatched prefix due to --yes flag")
-            
-def check_empty_user_prefix(user_prefix: str, assume_yes: bool):
+
+
+def check_empty_user_prefix(user_prefix: str, assume_yes: bool, warning_msg: str):
     # Destructive confirmation when empty prefix is provided (matches all instances subject to common tag)
     # python -m cloud_provisioner.cleanup_instances --user-prefix ""
-    
+
     if user_prefix == "":
-        logger.warning(f"Empty --user-prefix will match ALL instances (filtered only by common tag: '{DEFAULT_COMMON_TAG_KEY}={DEFAULT_COMMON_TAG_VALUE}')!")
+        logger.warning(
+            warning_msg
+        )
         if not assume_yes:
             resp = input("Proceed anyway? [y/N]: ").strip().lower()
             if resp not in ("y", "yes"):
@@ -48,4 +52,3 @@ def check_empty_user_prefix(user_prefix: str, assume_yes: bool):
                 sys.exit(1)
         else:
             logger.info("Proceeding with empty prefix due to --yes flag")
-        
