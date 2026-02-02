@@ -199,9 +199,7 @@ def _handle_empty_prefix(user_prefix: str, assume_yes: bool) -> None:
     if user_prefix != "":
         return
     logger.warning(
-        "Empty --user-prefix will match ALL instances (filtered only by common tag: '%s=%s')!",
-        DEFAULT_COMMON_TAG_KEY,
-        DEFAULT_COMMON_TAG_VALUE,
+        f"Empty --user-prefix will match ALL instances (filtered only by common tag: '{DEFAULT_COMMON_TAG_KEY}={DEFAULT_COMMON_TAG_VALUE}')!",
     )
     _confirm_or_abort("Proceed anyway? [y/N]: ", assume_yes, "Proceeding with empty prefix due to --yes flag")
 
