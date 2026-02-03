@@ -23,6 +23,7 @@ ALI_REGIONS = [
 ]
 AWS_REGIONS = [
     "us-west-2",   # Oregon
+    "sa-east-1",   # São Paulo
     "af-south-1",  # Cape Town
     "me-south-1",  # Bahrain
 ]

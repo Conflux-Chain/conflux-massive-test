@@ -19,4 +19,5 @@ echo "DefaultTasksMax=65535" | sudo tee -a /etc/systemd/system.conf
 sudo mkdir -p /etc/systemd/logind.conf.d
 echo "[Login] \nUserTasksMax=infinity" | sudo tee -a /etc/systemd/logind.conf.d/override.conf
 
+sudo apt update
 sudo apt install -y iotop
