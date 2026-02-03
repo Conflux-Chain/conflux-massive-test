@@ -3,6 +3,7 @@
 
 This script reads an inventory (by default `hosts.json`), launches nodes, runs the experiment, and collects logs.
 """
+import argparse
 import json
 import os
 import time
@@ -145,6 +146,11 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run a Conflux simulation on provisioned cloud instances")
+    parser.add_argument("--topology", choices=["random", "group-aware"], default="random", help="Topology strategy to use")
+    parser.add_argument("--log-prefix", default="logs", help="Base directory prefix for logs")
+    args = parser.parse_args()
+
     root = Path(__file__).resolve().parent
     servers_json = root / "hosts.json"
 
@@ -189,7 +195,7 @@ if __name__ == "__main__":
     config_file = generate_config_file(simulation_config, node_config)
     logger.success(f"完成配置文件 {config_file.path}")
 
-    log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+    log_path = f"{args.log_prefix}/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=True)
@@ -201,7 +207,21 @@ if __name__ == "__main__":
         logger.success("所有节点已启动")
     logger.info("准备连接拓扑网络")
 
-    topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers)
+    # Select topology strategy (random or group-aware)
+    if args.topology == "group-aware":
+        from remote_simulation.group_aware_topology import generate_group_aware_topology
+        topology = generate_group_aware_topology(
+            nodes,
+            out_degree=simulation_config.connect_peers,
+            in_degree=64,
+            min_intragroup=1,
+            latency_min=1,
+            latency_max=20,
+            cross_group_factor=5,
+        )
+    else:
+        topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers)
+
     for k, v in topology.peers.items():
         peer_list = ", ".join([str(i) for i in v])
         logger.debug(f"Node {nodes[k].id}({k}) has {len(v)} peers: {peer_list}")
