@@ -48,6 +48,7 @@ LOG_PATH="logs/$(date +"%Y%m%d%H%M%S")"
 # --- 步骤 1: 创建实例 ---
 print_separator "步骤 1/3: 创建云服务实例..."
 $PYTHON -m cloud_provisioner.create_instances
+cp hosts.json $LOG_PATH/hosts.json
 
 # --- 步骤 2: 远程模拟 ---
 print_separator "步骤 2/3: 开始远程模拟..."
@@ -60,4 +61,6 @@ trap - EXIT
 # --- 步骤 3: 日志分析 ---
 print_separator "步骤 3/3：开始分析日志"
 
-python -m aggregate_metrics -l $LOG_PATH/nodes | tee $LOG_PATH/exp_latency.log
+python -m analyzer.stat_latency -l $LOG_PATH/nodes | tee $LOG_PATH/exp_latency.log
+
+print_separator "测试完毕，查看 $LOG_PATH 获得更多细节"
