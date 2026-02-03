@@ -78,19 +78,13 @@ def _try_create_in_single_zone(client: IEcsClient, verifier: InstanceVerifier, c
     for zone_info in region_info.zones.values():
         ids = client.create_instances_in_zone(
             cfg, region_info, zone_info, instance_type, amount)
-        if not ids:
+        if len(ids) == 0:
             continue
-
-        # Track whatever instances returned (even partial successes) to avoid over-creating
-        verifier.submit_pending_instances(ids, instance_type)
-
-        if len(ids) < amount:
+        elif len(ids) < amount:
             # TODO: 关闭部分成功的 instance?
             logger.warning(
                 f"Only partial create instance success, even if minimum required ({region_info.id}/{zone_info.id})")
-            # Continue to try other zones to satisfy the remaining requested hosts
-            continue
         else:
-            # Got full batch in a single zone; submit and return
+            verifier.submit_pending_instances(ids, instance_type)
             # 无论这些实例是否都成功，不会再走 create_in_single_zone 的逻辑
             return
