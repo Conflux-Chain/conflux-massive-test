@@ -91,3 +91,25 @@ count = 10
 [[aws.instance_types]]
 name = "m6i.2xlarge"
 nodes = 1
+
+[tencent]
+# 云服务固有配置需要，不可修改
+provider = "tencent"
+default_user_name = "ubuntu"
+
+# 以下可修改
+user_tag = "lichenxing-alpha-5"
+image_name = "conflux-docker-base"
+ssh_key_path = "./keys/ssh-key.pem"
+
+[[tencent.instance_types]]
+name = "S8.2XLARGE32"
+nodes = 1
+
+[[tencent.instance_types]]
+name = "SA9.2XLARGE32"
+nodes = 1
+
+[[tencent.instance_types]]
+name = "S9.2XLARGE32"
+nodes = 1

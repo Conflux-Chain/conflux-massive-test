@@ -20,4 +20,8 @@ python_dateutil==2.9.0.post0
 Requests==2.32.5
 rlp==4.1.0
 safe_pysha3==1.0.5
+tencentcloud-sdk-python==3.1.42
+trie
+web3==7.4.0
+websockets==15.0.1
 tqdm==4.66.4

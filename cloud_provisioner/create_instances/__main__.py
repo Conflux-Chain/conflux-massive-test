@@ -14,6 +14,7 @@ from loguru import logger
 
 from ..aliyun_provider.client_factory import AliyunClient
 from ..aws_provider.client_factory import AwsClient
+from ..tencent_provider.client_factory import TencentClient
 from ..host_spec import save_hosts
 from ..provider_interface import IEcsClient
 
@@ -130,6 +131,10 @@ if __name__ == "__main__":
         if not config.aliyun.user_tag.startswith(user_tag_prefix):
             logger.error(f"Aliyun User tag {config.aliyun.user_tag} in config file does not match the prefix in environment variable USER_TAG_PREFIX='{user_tag_prefix}'")
             sys.exit(1)
+        
+    if config.tencent.total_nodes > 0:
+        tencent_client = TencentClient.load_from_env()
+        cloud_tasks.append((tencent_client, config.tencent))
         
     barrier = threading.Barrier(len(cloud_tasks))
         
