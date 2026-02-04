@@ -44,6 +44,7 @@ cleanup() {
 trap cleanup EXIT
 
 LOG_PATH="logs/$(date +"%Y%m%d%H%M%S")"
+mkdir -p $LOG_PATH
 
 # --- 步骤 1: 创建实例 ---
 print_separator "步骤 1/3: 创建云服务实例..."

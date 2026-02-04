@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import random
 import shutil
 
 from dotenv import load_dotenv
@@ -93,6 +94,8 @@ if __name__ == "__main__":
     nodes = launch_remote_nodes(host_specs, config_file, pull_docker_image=True)
     if len(nodes) < simulation_config.target_nodes:
         raise Exception("Not all nodes started")
+    sample_node = random.choice(nodes)
+    logger.info(f"随机选择观察节点 {sample_node.host_spec.ip} 来自 {sample_node.host_spec.provider} {sample_node.host_spec.region}")
     logger.success("所有节点已启动，准备连接拓扑网络")
 
     # 4. 手动连接网络
@@ -107,7 +110,8 @@ if __name__ == "__main__":
     init_tx_gen(nodes, node_config.txgen_account_count)
     logger.success("开始运行区块链系统")
     generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=100)
-    logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
+    
+    logger.info(f"Node goodput: {sample_node.rpc.test_getGoodPut()}")
     try:
         wait_for_nodes_synced(nodes)
         logger.success("测试完毕，准备采集日志数据")
@@ -115,7 +119,7 @@ if __name__ == "__main__":
         logger.warning("部分节点没有完全同步，准备采集日志数据")
     
     # 6. 获取结果
-    logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
+    logger.info(f"Node goodput: {sample_node.rpc.test_getGoodPut()}")
     
     nodes_log_path = f"{log_path}/nodes"
     Path(nodes_log_path).mkdir(parents=True, exist_ok=True)
