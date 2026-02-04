@@ -183,6 +183,7 @@ if __name__ == "__main__":
 
     simulation_config = SimulateOptions(
         target_nodes=total_nodes,
+        nodes_per_host=max_nodes_per_host,
         num_blocks=1000,
         connect_peers=8,
         target_tps=17000,

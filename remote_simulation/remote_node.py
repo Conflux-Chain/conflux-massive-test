@@ -103,38 +103,9 @@ class RemoteNodeRPC:
     timeout: int = 60
 
     def _call(self, method, *args):
-        """Send a JSON-RPC request with retries on HTTP 502 (Bad Gateway).
-
-        Retries up to 3 times with exponential backoff when a 502 is encountered
-        either via the response http status or an exception message.
-        """
-        max_retries = 3
-        delay = 1.0
         request = Request(method, *args)
-        for attempt in range(1, max_retries + 1):
-            try:
-                response: Response = self.client.send(request, timeout=self.timeout)
-                # Some client implementations expose the HTTP status on the response
-                http_status = getattr(response, "http_status", None) or getattr(response, "status", None) or getattr(response, "status_code", None)
-                if http_status == 502:
-                    raise ReceivedErrorResponseError(f"HTTP {http_status}")
-                return response.data.result
-            except ReceivedErrorResponseError as e:
-                # If it's a 502, retry; otherwise re-raise
-                if attempt < max_retries and ("502" in str(e) or "Bad Gateway" in str(e)):
-                    logger.debug(f"JSON-RPC 502 encountered for {method}, retry {attempt}/{max_retries} after {delay}s: {e}")
-                    time.sleep(delay)
-                    delay *= 2
-                    continue
-                raise
-            except Exception as e:
-                # Some network/HTTP libs embed the status in the exception message
-                if attempt < max_retries and ("502" in str(e) or "Bad Gateway" in str(e)):
-                    logger.debug(f"Transient 502 error for {method}, retry {attempt}/{max_retries} after {delay}s: {e}")
-                    time.sleep(delay)
-                    delay *= 2
-                    continue
-                raise
+        response: Response = self.client.send(request, timeout=self.timeout)
+        return response.data.result
     
     @property
     def addr(self):
