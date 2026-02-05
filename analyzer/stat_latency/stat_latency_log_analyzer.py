@@ -49,23 +49,40 @@ class Table:
             row = [name]
 
             for p in Percentile:
+                # skip Min column (header omits it)
+                if p is Percentile.Min:
+                    continue
+
                 if p in [Percentile.Avg, Percentile.Cnt]:
-                    row.append(stat.get(p))
-                elif p is not Percentile.Min:
-                    row.append(stat.get(p, data_format))
+                    v = stat.get(p)
+                else:
+                    v = stat.get(p, data_format)
+
+                # represent missing values clearly
+                if v is None:
+                    row.append("N/A")
+                else:
+                    row.append(v)
 
             self.add_row(row)
         except Exception as e:
-            logger.warning(f"Cannot add stat for '{name}': {e}, {stat.__dict__}")
+            try:
+                sdict = stat.__dict__
+            except Exception:
+                sdict = {}
+            logger.warning(f"Cannot add stat for '{name}': {e}, {sdict}")
 
 class LogAnalyzer:
-    def __init__(self, stat_name:str, log_dir:str, csv_output: Optional[str]=None):
+    def __init__(self, stat_name:str, log_dir:str, csv_output: Optional[str]=None, storage_db: Optional[str] = None, storage_kwargs: Optional[dict] = None, preserve_db: bool = False):
         self.stat_name = stat_name
         self.log_dir = log_dir
         self.csv_output = csv_output
+        self.storage_db = storage_db
+        self.storage_kwargs = storage_kwargs
+        self.preserve_db = preserve_db
 
     def analyze(self):
-        self.agg = LogAggregator.load(self.log_dir)
+        self.agg = LogAggregator.load(self.log_dir, self.storage_db, storage_kwargs=self.storage_kwargs, preserve_db=self.preserve_db)
 
         print("{} nodes in total".format(len(self.agg.sync_cons_gap_stats)))
         print("{} blocks generated".format(len(self.agg.blocks)))
@@ -75,6 +92,77 @@ class LogAnalyzer:
 
         table = Table.new_matrix(self.stat_name)
 
+    def analyze_db_only(self):
+        """Analyze only by reading existing storage DB (no log parsing).
+
+        Useful for debugging and validating that stored samples match in-memory results.
+        """
+        if not self.storage_db:
+            raise RuntimeError("--read-db requires -d/--storage-db pointing to an existing DB file")
+
+        # import storage lazily to avoid hard dependency in other contexts
+        try:
+            from .storage import SqliteStorage
+        except Exception:
+            raise
+
+        storage = SqliteStorage(self.storage_db, **(self.storage_kwargs or {}))
+        try:
+            # ensure any pending writes are flushed (if DB was recently written to)
+            storage.flush()
+
+            # quick DB counts for debugging
+            block_count = sum(1 for _ in storage.iter_block_hashes())
+            tx_count = sum(1 for _ in storage.iter_tx_hashes())
+            print(f"DB contains {block_count} blocks and {tx_count} transactions")
+
+            # build aggregator directly from storage and compute stats
+            self.agg = LogAggregator(storage)
+            # do not delete raw rows when analyzing DB-only
+            self.agg.generate_latency_stat(delete_after_read=False)
+
+            print("(db-only) {} nodes in total".format(len(self.agg.sync_cons_gap_stats)))
+            print("(db-only) {} blocks generated".format(block_count))
+
+            self.agg.validate()
+
+            table = Table.new_matrix(self.stat_name)
+
+            for t in BlockLatencyType:
+                for p in Percentile.node_percentiles():
+                    name = "block broadcast latency ({}/{})".format(t.name, p.name)
+                    table.add_stat(name, "%.2f", self.agg.stat_block_latency(t.name, p))
+
+            for t in BlockEventRecordType:
+                for p in Percentile.node_percentiles():
+                    name = "block event elapsed ({}/{})".format(t.name, p.name)
+                    table.add_stat(name, "%.2f", self.agg.stat_block_latency(t.name, p))
+
+            for t_name in self.agg.custom_block_latency_keys():
+                for p in Percentile.node_percentiles():
+                    name = "custom block event elapsed ({}/{})".format(t_name, p.name)
+                    table.add_stat(name, "%.2f", self.agg.stat_block_latency(t_name, p))
+
+            if len(self.agg.tx_latency_stats) != 0:
+                for p in Percentile.node_percentiles():
+                    name = "tx broadcast latency ({})".format(p.name)
+                    table.add_stat(name, "%.2f", self.agg.stat_tx_latency(p))
+
+                for p in Percentile.node_percentiles():
+                    name_tx_packed_to_block ="tx packed to block latency ({})".format(p.name)
+                    table.add_stat(name_tx_packed_to_block, "%.2f", self.agg.stat_tx_packed_to_block_latency(p))
+
+                table.add_stat("min tx packed to block latency", "%.2f", self.agg.stat_min_tx_packed_to_block_latency())
+                table.add_stat("min tx to ready pool latency", "%.2f", self.agg.stat_min_tx_to_ready_pool_latency())
+                table.add_stat("by_block_ratio", "%.2f", self.agg.stat_tx_ratio())
+                table.add_stat("Tx wait to be packed elasped time", "%.2f", self.agg.stat_tx_wait_to_be_packed())
+
+            table.pretty_print()
+        finally:
+            try:
+                storage.close()
+            except Exception:
+                pass
         for t in BlockLatencyType:
             for p in Percentile.node_percentiles():
                 name = "block broadcast latency ({}/{})".format(t.name, p.name)
