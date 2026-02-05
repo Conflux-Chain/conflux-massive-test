@@ -131,8 +131,9 @@ if __name__ == "__main__":
             logger.error(f"Aliyun User tag {config.aliyun.user_tag} in config file does not match the prefix in environment variable USER_TAG_PREFIX='{user_tag_prefix}'")
             sys.exit(1)
     
-    total_nodes = config.aws.total_nodes + config.aliyun.total_nodes
-    logger.success(f"计划启动 {total_nodes} 个节点，aws {config.aws.total_nodes}, aliyun {config.aliyun.total_nodes}")
+    if not args.network_only:
+        total_nodes = config.aws.total_nodes + config.aliyun.total_nodes
+        logger.success(f"计划启动 {total_nodes} 个节点，aws {config.aws.total_nodes}, aliyun {config.aliyun.total_nodes}")
         
     barrier = threading.Barrier(len(cloud_tasks))
         
