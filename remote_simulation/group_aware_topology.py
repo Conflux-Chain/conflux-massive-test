@@ -3,9 +3,10 @@
 Strategy (per user request):
 - Group nodes by (provider, region).
 - Each node has at most `out_degree` outgoing peers and at most `in_degree` incoming peers.
-- Each node must have at least `min_intragroup` outgoing peer(s) within its own group (if group size > 1).
+- Each node must have at least 2 outgoing peer(s) within its own group, if possible.
+- For groups with exactly two nodes, the pair will be mutually connected and each will be given at least one cross-group peer when capacity allows.
 - Prefer establishing outgoing links to nodes in other groups (cross-group) to reduce diameter — while respecting incoming capacity.
-- Cross-group latency is multiplied by `cross_group_factor` (default 5).
+- Cross-group latency is sampled from the same base range.
 
 The generator returns a `NetworkTopology` instance with per-edge latencies.
 """
@@ -13,7 +14,7 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from loguru import logger
 
@@ -25,10 +26,8 @@ def generate_group_aware_topology(
     nodes: List[RemoteNode],
     out_degree: int = 8,
     in_degree: int = 64,
-    min_intragroup: int = 1,
     latency_min: int = 1,
     latency_max: int = 20,
-    cross_group_factor: int = 5,
 ) -> NetworkTopology:
     """Generate a topology that is conscious of cloud provider/region grouping.
 
@@ -36,9 +35,7 @@ def generate_group_aware_topology(
         nodes: list of all nodes (order defines node indices used in the returned topology)
         out_degree: maximum number of outgoing peers per node
         in_degree: maximum number of incoming peers per node
-        min_intragroup: minimum number of outgoing intra-group peers per node (if possible)
-        latency_min, latency_max: base latency range (ms) for intra-group links; cross-group will be multiplied
-        cross_group_factor: multiplier for cross-group latencies
+        latency_min, latency_max: base latency range (ms) for intra-group and cross-group links
 
     Returns:
         NetworkTopology with edges added and latencies set
@@ -78,56 +75,31 @@ def generate_group_aware_topology(
         incoming_counts[to] += 1
         return True
 
-    # 1) Ensure each node has at least `min_intragroup` outgoing intra-group peers (if group has >1)
+    # 1) Ensure each node has at least 2 outgoing intra-group peers (if possible)
     for group_key, idxs in groups.items():
         size = len(idxs)
-        if size == 1:
+        if size <= 1:
             # singleton group cannot satisfy intra-group requirement
             continue
-
-        # simple local ring to guarantee intra-group connectivity and one outgoing peer
-        for i, node_idx in enumerate(idxs):
-            if outgoing_counts[node_idx] >= out_degree:
-                continue
-            next_node_idx = idxs[(i + 1) % size]
-            latency = random.randint(latency_min, latency_max)
-            added = try_add_connection(node_idx, next_node_idx, latency)
-            if not added:
-                # if we couldn't add (incoming limit / duplicate), try to find another intra-group peer
-                for candidate in idxs:
-                    if candidate == node_idx:
-                        continue
-                    if outgoing_counts[node_idx] >= out_degree:
-                        break
-                    if incoming_counts[candidate] >= in_degree:
-                        continue
-                    if candidate in topology.get_peers(node_idx):
-                        continue
-                    latency = random.randint(latency_min, latency_max)
-                    if try_add_connection(node_idx, candidate, latency):
-                        break
-
-    # If min_intragroup > 1, try to add more intra peers up to min_intragroup
-    if min_intragroup > 1:
-        for group_key, idxs in groups.items():
-            size = len(idxs)
-            if size == 1:
-                continue
-            for node_idx in idxs:
-                while outgoing_counts[node_idx] < min(min_intragroup, out_degree):
-                    # choose random intra-group candidate
-                    candidates = [c for c in idxs if c != node_idx and c not in topology.get_peers(node_idx) and incoming_counts[c] < in_degree]
-                    if not candidates:
-                        break
-                    candidate = random.choice(candidates)
-                    latency = random.randint(latency_min, latency_max)
-                    try_add_connection(node_idx, candidate, latency)
+        for node_idx in idxs:
+            required_intra = min(2, size - 1, out_degree)
+            while outgoing_counts[node_idx] < required_intra:
+                candidates = [
+                    c
+                    for c in idxs
+                    if c != node_idx
+                    and c not in topology.get_peers(node_idx)
+                    and incoming_counts[c] < in_degree
+                ]
+                if not candidates:
+                    break
+                candidate = random.choice(candidates)
+                latency = random.randint(latency_min, latency_max)
+                try_add_connection(node_idx, candidate, latency)
 
     # 2) Prefer cross-group connections to reduce diameter and worst-case latency
     #    For each node, fill outgoing slots up to `out_degree` preferring nodes from other groups,
     #    selecting targets with lowest incoming_counts first to balance incoming load.
-    group_keys = list(groups.keys())
-
     for node_idx in range(num_nodes):
         if outgoing_counts[node_idx] >= out_degree:
             continue
@@ -150,7 +122,7 @@ def generate_group_aware_topology(
                 continue
             if incoming_counts[target] >= in_degree:
                 continue
-            latency = random.randint(latency_min, latency_max) * cross_group_factor
+            latency = random.randint(latency_min, latency_max)
             try_add_connection(node_idx, target, latency)
 
         # If still have capacity, add intra-group peers to fill up to out_degree
@@ -162,20 +134,31 @@ def generate_group_aware_topology(
             latency = random.randint(latency_min, latency_max)
             try_add_connection(node_idx, target, latency)
 
-    # 3) If some nodes have no intra-group outgoing peers but their group has others, ensure that requirement if possible
+    # 2b) Special-case: for groups with exactly 2 nodes, ensure mutual intra-group links exist
+    # and try to give each node at least one cross-group peer when capacity allows.
     for group_key, idxs in groups.items():
-        if len(idxs) <= 1:
+        if len(idxs) != 2:
             continue
-        for node_idx in idxs:
-            # check if node has at least one intra-group peer
+        a, b = idxs[0], idxs[1]
+        # ensure mutual connection a->b and b->a if possible
+        if b not in topology.get_peers(a) and outgoing_counts[a] < out_degree and incoming_counts[b] < in_degree:
+            latency = random.randint(latency_min, latency_max)
+            try_add_connection(a, b, latency)
+        if a not in topology.get_peers(b) and outgoing_counts[b] < out_degree and incoming_counts[a] < in_degree:
+            latency = random.randint(latency_min, latency_max)
+            try_add_connection(b, a, latency)
+
+        # ensure each has at least one cross-group peer if possible
+        for node_idx in (a, b):
             peers = topology.get_peers(node_idx)
-            has_intra = any((p in idxs) for p in peers)
-            if not has_intra and outgoing_counts[node_idx] < out_degree:
-                # try to add one
-                candidates = [c for c in idxs if c != node_idx and incoming_counts[c] < in_degree and c not in peers]
-                if not candidates:
+            has_cross = any((p not in idxs) for p in peers)
+            if not has_cross and outgoing_counts[node_idx] < out_degree:
+                cross_candidates = [i for k, others in groups.items() if k != group_key for i in others if i not in peers and incoming_counts[i] < in_degree]
+                if not cross_candidates:
                     continue
-                target = random.choice(candidates)
+                random.shuffle(cross_candidates)
+                cross_candidates.sort(key=lambda x: incoming_counts[x])
+                target = cross_candidates[0]
                 latency = random.randint(latency_min, latency_max)
                 try_add_connection(node_idx, target, latency)
 
