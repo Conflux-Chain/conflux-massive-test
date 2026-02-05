@@ -2,9 +2,8 @@
 keys/*
 /ref
 
-ali_servers.json
 hosts.json
-instances.pkl
+request_config.toml
 logs/
 
 # Byte-compiled / optimized / DLL files

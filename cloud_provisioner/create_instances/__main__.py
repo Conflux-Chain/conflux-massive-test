@@ -2,10 +2,12 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
+import sys
 import threading
 import tomllib
 import traceback
 from typing import Optional
+import os
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -110,16 +112,24 @@ if __name__ == "__main__":
     with open("request_config.toml", "rb") as f:
         data = tomllib.load(f)
         config = ProvisionConfig(**data)
+        
+    user_tag_prefix = os.getenv("USER_TAG_PREFIX", "")
 
     cloud_tasks = []
     
     if config.aws.total_nodes > 0:
         aws_client = AwsClient.new()
         cloud_tasks.append((aws_client, config.aws))
-    
+        if not config.aws.user_tag.startswith(user_tag_prefix):
+            logger.error(f"AWS user tag {config.aws.user_tag} in config file does not match the prefix in environment variable USER_TAG_PREFIX='{user_tag_prefix}'")
+            sys.exit(1)
+     
     if config.aliyun.total_nodes > 0:
         ali_client = AliyunClient.load_from_env()
         cloud_tasks.append((ali_client, config.aliyun))
+        if not config.aliyun.user_tag.startswith(user_tag_prefix):
+            logger.error(f"Aliyun User tag {config.aliyun.user_tag} in config file does not match the prefix in environment variable USER_TAG_PREFIX='{user_tag_prefix}'")
+            sys.exit(1)
         
     barrier = threading.Barrier(len(cloud_tasks))
         
@@ -132,3 +142,4 @@ if __name__ == "__main__":
         hosts = list(chain.from_iterable(future.result() for future in futures))
         
     save_hosts(hosts, args.output_json)
+    logger.success(f"节点启动完成，节点信息已写入 {args.output_json}")

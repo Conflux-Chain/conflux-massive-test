@@ -80,8 +80,8 @@ if __name__ == "__main__":
     num_target_nodes = sum([s.nodes_per_host for s in host_specs])
     connect_peers = min(7, num_target_nodes - 1)
 
-    simulation_config = SimulateOptions(target_nodes=num_target_nodes, num_blocks=2000, connect_peers=7, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
-    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = 500) # send_tx_period_ms=200,
+    simulation_config = SimulateOptions(target_nodes=num_target_nodes, num_blocks=2000, connect_peers=connect_peers, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
+    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = 500)
     assert node_config.txgen_account_count * simulation_config.target_nodes <= 100_000
 
     config_file = generate_config_file(simulation_config, node_config)
@@ -117,10 +117,14 @@ if __name__ == "__main__":
     # 6. 获取结果
     logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
     
-    collect_logs(nodes, log_path)
-    logger.success(f"日志收集完毕，路径 {os.path.abspath(log_path)}")
+    nodes_log_path = f"{log_path}/nodes"
+    Path(nodes_log_path).mkdir(parents=True, exist_ok=True)
+    
+    collect_logs(nodes, nodes_log_path)
+    logger.info(f"日志收集完毕")
+    logger.success(f"实验完毕，日志路径 {os.path.abspath(log_path)}")
 
-    shutil.copy(args.host_spec, f"{log_path}/servers.json")
+    # shutil.copy(args.host_spec, f"{log_path}/servers.json")
 
     # stop_remote_nodes(ip_addresses)
     # destory_remote_nodes(ip_addresses)
