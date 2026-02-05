@@ -8,6 +8,7 @@ from utils import shell_cmds
 from remote_simulation.port_allocation import remote_rpc_port
 from utils.counter import AtomicCounter
 from utils.tempfile import TempFile
+from utils.in_china import region_in_china
 from itertools import chain
 
 
@@ -94,6 +95,8 @@ def _execute_instance(host_spec: HostSpec, ctx: InstanceExecutionContext) -> Lis
 
         logger.debug(f"实例 {ip_address} 同步配置完成")
         if ctx.pull_docker_image:
+            if host_spec.region and region_in_china(host_spec.region):
+                shell_cmds.inject_dockerhub_mirrors(host_spec.ip, user=user)
             shell_cmds.ssh(ip_address, user, docker_cmds.pull_image())
             logger.debug(f"实例 {ip_address} 拉取 docker 镜像完成")
 

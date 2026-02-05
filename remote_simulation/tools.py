@@ -79,7 +79,8 @@ def init_tx_gen(nodes: List[RemoteNode], txgen_account_count:int, max_workers: i
 
 def _stop_node_and_collect_log(node: RemoteNode, *, counter1: AtomicCounter, counter2: AtomicCounter, total_cnt: int, local_path: str = "./logs"):
     try:
-        shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, docker_cmds.stop_node_and_collect_log(node.index, user = node.host_spec.ssh_user))
+        user = node.host_spec.ssh_user
+        shell_cmds.ssh(node.host_spec.ip, user, docker_cmds.stop_node_and_collect_log(node.index, user=user))
         cnt1 = counter1.increment()
         logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
 

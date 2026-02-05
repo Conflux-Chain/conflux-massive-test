@@ -20,6 +20,7 @@ ALI_REGIONS = [
     "ap-northeast-2",  # Korea
     "ap-southeast-1",  # Singapore
     "me-east-1",       # United Arab Emirates
+    "cn-wulanchabu",
 ]
 AWS_REGIONS = [
     "us-west-2",   # Oregon

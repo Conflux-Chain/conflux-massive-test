@@ -1,7 +1,9 @@
+import json
 import os
 import subprocess
 import time
 from typing import List
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -112,3 +114,53 @@ def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None =
             else:
                 logger.debug(f"{ip_address} SSH 失败，已达到最大重试次数")
                 raise
+
+
+def inject_dockerhub_mirrors(
+    ip_address: str,
+    *,
+    user: str = "root",
+    mirrors: List[str] | None = None,
+    max_retries: int = 3,
+    retry_delay: int = 15,
+):
+    if not mirrors:
+        mirrors = [
+            "https://docker.xuanyuan.me",
+            "https://docker.1ms.run",
+            "https://lispy.org",
+        ]
+    insecure_registries: List[str] = []
+    for mirror in mirrors:
+        parsed = urlparse(mirror)
+        if parsed.scheme == "http":
+            host = parsed.netloc or parsed.path
+            if host:
+                insecure_registries.append(host)
+    daemon_payload = {"registry-mirrors": mirrors}
+    if insecure_registries:
+        daemon_payload["insecure-registries"] = insecure_registries
+    daemon_config = json.dumps(daemon_payload, separators=(',', ':'))
+    # Use a single-line command and send JSON via stdin (no JSON embedded in the command)
+    write_cmd = f"mkdir -p /etc/docker && echo '{daemon_config}' > /etc/docker/daemon.json"
+    # Write /etc/docker/daemon.json to the remote machine by sending JSON on stdin
+    ssh(
+        ip_address,
+        user,
+        write_cmd,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )
+
+    # Copy the restart-only script and execute it
+    local_script = "auxiliary/scripts/remote/inject_dockerhub_mirrors.sh"
+    remote_script = "/tmp/inject_dockerhub_mirrors.sh"
+    scp(local_script, ip_address, user=user, remote_path=remote_script, max_retries=max_retries, retry_delay=retry_delay)
+
+    return ssh(
+        ip_address,
+        user,
+        f"chmod +x {remote_script} && {remote_script}",
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )

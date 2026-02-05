@@ -27,6 +27,7 @@ from remote_simulation.tools import init_tx_gen, wait_for_nodes_synced
 from utils.counter import AtomicCounter
 from utils.wait_until import WaitUntilTimeoutError
 from utils import shell_cmds
+from utils.in_china import region_in_china
 
 
 HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=200)
@@ -81,6 +82,8 @@ def _execute_instance(host: HostSpec, nodes_per_host: int, config_file, pull_doc
         shell_cmds.scp(config_file.path, host.ip, host.ssh_user, "~/config.toml")
         logger.debug(f"实例 {host.ip} 同步配置完成")
         if pull_docker_image:
+            if host.region and region_in_china(host.region):
+                shell_cmds.inject_dockerhub_mirrors(host.ip, user=host.ssh_user)
             shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image())
             logger.debug(f"实例 {host.ip} 拉取 docker 镜像完成")
         shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.destory_all_nodes())
