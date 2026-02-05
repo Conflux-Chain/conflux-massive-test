@@ -53,6 +53,7 @@ def create_instances_in_zone(
         internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
         internet_charge_type="PayByTraffic",
         instance_charge_type="PostPaid",
+        spot_strategy="SpotAsPriceGo",
         tag=_instance_tags(cfg),
         amount=max_amount,
         min_amount=min_amount,
