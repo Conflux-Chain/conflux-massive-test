@@ -3,14 +3,14 @@
 import json
 import time
 import traceback
-from typing import List
+from typing import List, Tuple
 
 from alibabacloud_ecs20140526.models import DescribeInstancesRequest, RunInstancesRequestTag, RunInstancesRequestSystemDisk, RunInstancesRequest, DescribeInstancesResponseBodyInstancesInstance, DeleteInstancesRequest
 from loguru import logger
 
 from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 
-from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType
+from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType, CreateInstanceError
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 from alibabacloud_ecs20140526.client import Client
     
@@ -35,9 +35,9 @@ def create_instances_in_zone(
     region_info: RegionInfo,
     zone_info: ZoneInfo,
     instance_type: InstanceType,
-    amount: int,
-    allow_partial_success: bool = False,
-) -> list[str]:    
+    max_amount: int,
+    min_amount: int,
+) -> Tuple[list[str], CreateInstanceError]:    
     disk = RunInstancesRequestSystemDisk(category="cloud_essd", size=str(cfg.disk_size))
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
         
@@ -54,12 +54,10 @@ def create_instances_in_zone(
         internet_charge_type="PayByTraffic",
         instance_charge_type="PostPaid",
         tag=_instance_tags(cfg),
-        amount=amount,
+        amount=max_amount,
+        min_amount=min_amount,
         system_disk=disk,
     )
-    
-    if allow_partial_success:
-        req.min_amount = 1
 
     try:
         resp = client.run_instances(req)
@@ -67,18 +65,24 @@ def create_instances_in_zone(
         assert ids is not None
         logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}")
         # ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
-        return ids
+        return ids, CreateInstanceError.Nil
     except Exception as exc:
-        e = traceback.format_exc()
         code = getattr(exc, "code", None)
+        error_type = CreateInstanceError.Others
+        
         if code == "OperationDenied.NoStock":
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={amount}")
+            error_type = CreateInstanceError.NoStock
+            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
+        
         elif code == "InvalidResourceType.NotSupported":
-            logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={amount}")
+            error_type = CreateInstanceError.NoInstanceType
+            logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
+        
         else:
             logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-            logger.error(e)
-        return []
+            logger.error(traceback.format_exc())
+        
+        return [], error_type
     
 def describe_instance_status(client: Client, region_id: str, instance_ids: List[str]):
     running_instances = dict()

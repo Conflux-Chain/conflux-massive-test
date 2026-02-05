@@ -1,5 +1,7 @@
 #!/bin/bash
 
+ulimit -n 65536
+
 # 加载 .env 文件
 if [ -f .env ]; then
     set -a  # 自动导出所有变量
@@ -49,7 +51,6 @@ mkdir -p $LOG_PATH
 # --- 步骤 1: 创建实例 ---
 print_separator "步骤 1/3: 创建云服务实例..."
 $PYTHON -m cloud_provisioner.create_instances
-cp hosts.json $LOG_PATH/hosts.json
 
 # --- 步骤 2: 远程模拟 ---
 print_separator "步骤 2/3: 开始远程模拟..."

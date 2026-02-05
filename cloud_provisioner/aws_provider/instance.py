@@ -2,14 +2,14 @@
 
 import time
 import traceback
-from typing import List
+from typing import List, Tuple
 
 from botocore.exceptions import ClientError
 from loguru import logger
 
 from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 
-from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType
+from ..create_instances.types import CreateInstanceError, InstanceStatus, RegionInfo, ZoneInfo, InstanceType
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 
 from mypy_boto3_ec2.client import EC2Client
@@ -41,21 +41,18 @@ def create_instances_in_zone(
     region_info: RegionInfo,
     zone_info: ZoneInfo,
     instance_type: InstanceType,
-    amount: int,
-    allow_partial_success: bool = False,
-) -> list[str]:    
+    max_amount: int,
+    min_amount: int,
+) -> Tuple[list[str], CreateInstanceError]:   
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
     
     tags = _instance_tags(cfg) + [{'Key': 'Name', 'Value': name}]
     
-    min_count = 1 if allow_partial_success else amount
-    max_count = amount
-    
     try:
         response = client.run_instances(
             ImageId=region_info.image_id,
-            MinCount=min_count,
-            MaxCount=max_count,
+            MinCount=min_amount,
+            MaxCount=max_amount,
             KeyName=region_info.key_pair_name,
             InstanceType=instance_type.name, # pyright: ignore[reportArgumentType]
             NetworkInterfaces=[{
@@ -82,22 +79,30 @@ def create_instances_in_zone(
         )
         ids = [instance['InstanceId'] for instance in response['Instances']]
         assert ids is not None
-        logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}")
-        return ids
+        logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={min_amount}~{max_amount}")
+        return ids, CreateInstanceError.Nil
     except ClientError as exc:
-        e = traceback.format_exc()
         code = exc.response['Error']['Code']
+        error_type = CreateInstanceError.Others
+        
         if code == "InsufficientInstanceCapacity":
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={amount}")
-            return []
-        logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-        logger.error(e)
-        return []
+            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
+            error_type = CreateInstanceError.NoStock
+            
+        elif code == "Unsupported":
+            logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
+            error_type = CreateInstanceError.NoInstanceType
+            
+        else:
+            logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+            logger.error(f"{exc.__dict__}")
+            logger.error(traceback.format_exc())
+            
+        return [], error_type
     except Exception as exc:
-        e = traceback.format_exc()
         logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-        logger.error(e)
-        return []
+        logger.error(traceback.format_exc())
+        return [], CreateInstanceError.Others
     
 def describe_instance_status(client: EC2Client, instance_ids: List[str]):
     running_instances = dict()

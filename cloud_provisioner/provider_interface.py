@@ -1,7 +1,7 @@
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Tuple
 
 from .create_instances.instance_config import InstanceConfig
-from .create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
+from .create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo, CreateInstanceError
 from .cleanup_instances.types import InstanceInfoWithTag
 
 from abc import ABC, abstractmethod
@@ -48,9 +48,9 @@ class IEcsClient(ABC):
         region_info: RegionInfo,
         zone_info: ZoneInfo,
         instance_type: InstanceType,
-        amount: int,
-        allow_partial_success: bool = False,
-    ) -> list[str]:
+        max_amount: int,
+        min_amount: int,
+    ) -> Tuple[list[str], CreateInstanceError]:
         ...
         
     @abstractmethod

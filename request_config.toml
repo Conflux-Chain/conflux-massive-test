@@ -8,41 +8,46 @@ user_tag = "lichenxing-alpha-5"
 image_name = "conflux-docker-base"
 ssh_key_path = "./keys/ssh-key.pem"
 
+# [[aliyun.regions]]
+# # 香港
+# name = "cn-hongkong"
+# count = 50
+
 [[aliyun.regions]]
 # 新加坡
 name = "ap-southeast-1"
 # count 设为 0 或者注释掉可以跳过区域
-count = 10
+count = 50
 
 [[aliyun.regions]]
 # 韩国（首尔）
 name = "ap-northeast-2"
-count = 10
+count = 50
 
 [[aliyun.regions]]
 # 马来西亚（吉隆坡）
 name = "ap-southeast-3"
-count = 10
+count = 50
 
 [[aliyun.regions]]
 # 印度尼西亚（雅加达）
 name = "ap-southeast-5"
-count = 10
+count = 50
 
 [[aliyun.regions]]
 # 菲律宾（马尼拉）
 name = "ap-southeast-6"
-count = 10
+count = 50
 
 [[aliyun.regions]]
 # 泰国（曼谷）
 name = "ap-southeast-7"
-count = 10
+count = 50
 
 [[aliyun.regions]]
 # 阿联酋（迪拜）
 name = "me-east-1"
-count = 10
+count = 50
 
 [[aliyun.instance_types]]
 name = "ecs.g8i.2xlarge"
@@ -75,17 +80,19 @@ name = "us-west-2"
 [[aws.regions]]
 # 中国香港
 name = "ap-east-1"
-count = 10
+count = 80
 
 [[aws.regions]]
 # 巴林
 name = "me-south-1"
-count = 10
+count = 50
 
 [[aws.regions]]
 # 南非（开普敦）
 name = "af-south-1"
-count = 10
+count = 20
+zone_max_nodes = 0
+max_nodes = 10
 
 [[aws.regions]]
 # 巴西（圣保罗）
@@ -96,3 +103,15 @@ name = "sa-east-1"
 [[aws.instance_types]]
 name = "m6i.2xlarge"
 nodes = 1
+
+[[aws.instance_types]]
+name = "m7i.2xlarge"
+nodes = 1
+
+[[aws.instance_types]]
+name = "m6i.4xlarge"
+nodes = 2
+
+[[aws.instance_types]]
+name = "m7i.4xlarge"
+nodes = 2

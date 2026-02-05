@@ -24,6 +24,7 @@ class InstanceVerifier:
     pending_instances: Dict[str, Instance]
 
     _event: threading.Event
+    _stop: threading.Event
     _lock: threading.RLock
     _running_queue: Queue[Dict[str, str]]
 
@@ -33,9 +34,17 @@ class InstanceVerifier:
         self.request_nodes = target_nodes + additional_nodes
         self.ready_instances = []
         self.pending_instances = dict()
+        
+        self._stop = threading.Event()
         self._event = threading.Event()
         self._lock = threading.RLock()
         self._running_queue = Queue(maxsize=10000)
+        
+    def stop(self):
+        self._stop.set()
+        
+    def is_running(self):
+        return not self._stop.is_set()
 
     def submit_pending_instances(self, ids: List[str], type: InstanceType, zone_id: str):
         self.pending_instances.update(
@@ -78,7 +87,7 @@ class InstanceVerifier:
     def describe_instances_loop(self, client: IEcsClient, check_interval: float = 3.0):
         processed_instances: Set[str] = set()
 
-        while True:
+        while self.is_running():
             # 获取当前 pending instance
             with self._lock:
                 to_check_instances = set(
@@ -111,14 +120,15 @@ class InstanceVerifier:
 
                 if self.ready_nodes >= self.target_nodes:
                     logger.info(
-                        f"Region {self.region_id} reach target nodes, thread describe_instances loop quit")
+                        f"Region {self.region_id} reach target nodes, thread describe_instances loop exit")
                     return
 
             time.sleep(check_interval)
+        logger.info(f"Region {self.region_id} not reach target nodes, thread describe_instances is stopped manually.")
 
     def wait_for_ssh_loop(self):
         future_set = dict()
-        while True:
+        while self.is_running():
             # 从队列获取任务并提交
             try:
                 running_instances = self._running_queue.get_nowait()
@@ -161,10 +171,11 @@ class InstanceVerifier:
             with self._lock:
                 if self.ready_nodes >= self.target_nodes:
                     logger.info(
-                        f"Region {self.region_id} reach target nodes, thread wait_for_ssh_loop quit")
+                        f"Region {self.region_id} reach target nodes, thread wait_for_ssh_loop exit")
                     return
 
             time.sleep(1)
+        logger.info(f"Region {self.region_id} not reach target nodes, thread wait_for_ssh_loop is stopped manually.")
 
 def _check_port(ip: str, timeout: int = 5):
     """
