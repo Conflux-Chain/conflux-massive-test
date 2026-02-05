@@ -30,9 +30,9 @@ from .instance_prep import (
 DEFAULT_IMAGE_NAME = "conflux-docker-base"
 
 # Instance type selection defaults for image-building flow
-DEFAULT_MIN_CPU_CORES = 4
-DEFAULT_MIN_MEMORY_GB = 8.0
-DEFAULT_MAX_MEMORY_GB = 8.0
+DEFAULT_MIN_CPU_CORES = 2
+DEFAULT_MIN_MEMORY_GB = 4.0
+DEFAULT_MAX_MEMORY_GB = 4.0
 
 
 def pick_instance_type_for_building_image(c: EcsClient, cfg: EcsRuntimeConfig) -> Optional[tuple[str, str]]:

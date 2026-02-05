@@ -59,13 +59,23 @@ class Table:
             logger.warning(f"Cannot add stat for '{name}': {e}, {stat.__dict__}")
 
 class LogAnalyzer:
-    def __init__(self, stat_name:str, log_dir:str, csv_output: Optional[str]=None):
+    def __init__(self, stat_name:str, log_dir:str, csv_output: Optional[str]=None, max_blocks: Optional[int]=None):
         self.stat_name = stat_name
         self.log_dir = log_dir
         self.csv_output = csv_output
+        self.max_blocks = max_blocks
 
     def analyze(self):
         self.agg = LogAggregator.load(self.log_dir)
+
+        # Optionally limit to earliest N blocks
+        if self.max_blocks is not None:
+            # sort blocks by timestamp and keep first max_blocks
+            blocks_sorted = sorted(self.agg.blocks.values(), key=lambda b: b.timestamp)
+            if len(blocks_sorted) > self.max_blocks:
+                kept = {b.hash: b for b in blocks_sorted[: self.max_blocks]}
+                self.agg.blocks = kept
+                print(f"Limiting analysis to earliest {self.max_blocks} blocks (remaining blocks: {len(self.agg.blocks)})")
 
         print("{} nodes in total".format(len(self.agg.sync_cons_gap_stats)))
         print("{} blocks generated".format(len(self.agg.blocks)))
@@ -153,6 +163,7 @@ class LogAnalyzer:
 
         tx_sum = sum(block_txs_list)
         print("{} txs generated".format(tx_sum))
+        print("Test duration is {:.2f} seconds".format(max_time - min_time))
         print("Throughput is {}".format(tx_sum / (max_time - min_time)))
         slowest_tx_latency = self.agg.get_largest_min_tx_packed_latency_hash()
         if slowest_tx_latency is not None:
