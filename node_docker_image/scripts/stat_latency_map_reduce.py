@@ -7,6 +7,13 @@ import enum
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Optional
+
+# optional on-disk storage
+try:
+    from .storage import SqliteStorage
+except Exception:
+    SqliteStorage = None
 
 def parse_value(log_line:str, prefix:str, suffix:str):
     start = 0 if prefix is None else log_line.index(prefix) + len(prefix)
@@ -369,54 +376,96 @@ class Statistics:
             self.__dict__[p.name] = value
 
     def get(self, p:Percentile, data_format:str=None):
-        result = self.__dict__[p.name]
+        # Return None if the requested percentile was not computed (no data)
+        result = self.__dict__.get(p.name)
+
+        if result is None:
+            return None
 
         if data_format is not None:
-            result = data_format % result
+            try:
+                result = data_format % result
+            except Exception:
+                # fallback to plain result if formatting fails
+                pass
 
         return result
 
 class NodeLogMapper:
-    def __init__(self, log_file:str):
+    def __init__(self, log_file:str, storage: Optional[SqliteStorage] = None):
         assert os.path.exists(log_file), "log file not found: {}".format(log_file)
         self.log_file = log_file
+        self.storage = storage
 
-        self.blocks = {}
-        self.txs = {}
+        # small in-memory lists that are cheap
+        self.blocks = {} if storage is None else {}
+        self.txs = {} if storage is None else {}
         self.by_block_ratio=[]
         self.sync_cons_gaps = []
 
     @staticmethod
-    def mapf(log_file:str):
-        mapper = NodeLogMapper(log_file)
+    def mapf(log_file:str, storage: Optional[SqliteStorage] = None):
+        mapper = NodeLogMapper(log_file, storage)
         mapper.map()
         return mapper
 
     def map(self):
+        from loguru import logger
+        logger.info("Mapping file {}", self.log_file)
         with open(self.log_file, "r", encoding='UTF-8') as file:
-            for line in file:
+            for i, line in enumerate(file, 1):
                 self.parse_log_line(line)
+                if i % 10000 == 0:
+                    logger.debug("Parsed {} lines in {}", i, self.log_file)
+        # if using storage, ensure pending changes are committed
+        if self.storage is not None:
+            try:
+                self.storage.commit()
+                logger.info("Finished mapping {} and committed to storage", self.log_file)
+            except Exception as e:
+                logger.exception("Error committing storage after mapping {}: {}", self.log_file, e)
+
 
     def parse_log_line(self, line:str):
         if "transaction received by block" in line:
-            self.by_block_ratio.append(float(parse_value(line, "ratio=", None)))
+            val = float(parse_value(line, "ratio=", None))
+            self.by_block_ratio.append(val)
 
         if "new block received" in line:
             block = Block.receive(line, BlockLatencyType.Receive)
-            Block.add_or_merge(self.blocks, block)
+            if self.storage is None:
+                Block.add_or_merge(self.blocks, block)
+            else:
+                self.storage.add_block_meta(block.hash, block.txs, block.size, block.timestamp, block.referees)
+                self.storage.add_block_latency(block.hash, BlockLatencyType.Receive.name, round(parse_log_timestamp(line) - block.timestamp, 2))
 
         if "new block inserted into graph" in line:
             block = Block.receive(line, BlockLatencyType.Sync)
-            Block.add_or_merge(self.blocks, block)
+            if self.storage is None:
+                Block.add_or_merge(self.blocks, block)
+            else:
+                self.storage.add_block_meta(block.hash, block.txs, block.size, block.timestamp, block.referees)
+                self.storage.add_block_latency(block.hash, BlockLatencyType.Sync.name, round(parse_log_timestamp(line) - block.timestamp, 2))
 
         if "insert new block into consensus" in line:
             block = Block.receive(line, BlockLatencyType.Cons)
-            Block.add_or_merge(self.blocks, block)
+            if self.storage is None:
+                Block.add_or_merge(self.blocks, block)
+            else:
+                self.storage.add_block_meta(block.hash, block.txs, block.size, block.timestamp, block.referees)
+                self.storage.add_block_latency(block.hash, BlockLatencyType.Cons.name, round(parse_log_timestamp(line) - block.timestamp, 2))
 
         if "Block events record complete" in line or "Block events record partially complete" in line:
             records = BlockEventRecord.parse(line)
-            if records is not None and self.blocks.get(records.hash) is not None:
-                self.blocks[records.hash].set_block_event_record(records)
+            if records is not None:
+                if self.storage is None:
+                    if self.blocks.get(records.hash) is not None:
+                        self.blocks[records.hash].set_block_event_record(records)
+                else:
+                    for t in records.records:
+                        self.storage.add_block_latency(records.hash, t.name, records.records[t])
+                    for t in records.custom_records:
+                        self.storage.add_block_latency(records.hash, t.name, records.custom_records[t])
 
         if "Statistics" in line:
             sync_len = int(parse_value(line, "SyncGraphStatistics { inserted_block_count: ", ","))
@@ -426,7 +475,19 @@ class NodeLogMapper:
 
         if "Sampled transaction" in line:
             tx = Transaction.receive(line)
-            Transaction.add_or_replace(self.txs, tx)
+            if self.storage is None:
+                Transaction.add_or_replace(self.txs, tx)
+            else:
+                # record receive/packed/ready timestamps into storage
+                if tx.received_timestamps:
+                    for ts in tx.received_timestamps:
+                        self.storage.add_tx_received(tx.hash, ts)
+                if tx.packed_timestamps and tx.packed_timestamps[0] is not None:
+                    for ts in (t for t in tx.packed_timestamps if t is not None):
+                        self.storage.add_tx_packed(tx.hash, ts)
+                if tx.ready_pool_timestamps and tx.ready_pool_timestamps[0] is not None:
+                    for ts in (t for t in tx.ready_pool_timestamps if t is not None):
+                        self.storage.add_tx_ready(tx.hash, ts)
 
 
 class HostLogReducer:
@@ -505,33 +566,88 @@ class HostLogReducer:
         return reducer
 
     @staticmethod
-    def loadf(input_file:str):
+    def loadf(input_file:str, storage: Optional[SqliteStorage] = None):
         with open(input_file, "r") as fp:
             data = json.load(fp)
-            return HostLogReducer.load(data)
+            if storage is None:
+                return HostLogReducer.load(data)
+
+            # storage mode: stream blocks and txs to storage and return minimal reducer
+            reducer = HostLogReducer([])
+
+            for by_block_ratio in data.get("by_block_ratio", []):
+                reducer.by_block_ratio.append(by_block_ratio)
+
+            for stat_dict in data.get("sync_cons_gap_stats", []):
+                stat = Statistics([1])
+                stat.__dict__ = stat_dict
+                reducer.sync_cons_gap_stats.append(stat)
+
+            for block_dict in data.get("blocks", {}).values():
+                # block_dict is a serialized block; write meta and latencies
+                block_hash = block_dict.get("hash")
+                txs = block_dict.get("txs", 0)
+                size = block_dict.get("size", 0)
+                timestamp = block_dict.get("timestamp", 0)
+                referees = block_dict.get("referees", [])
+                try:
+                    storage.add_block_meta(block_hash, txs, size, timestamp, referees)
+                    lat_map = block_dict.get("latencies", {})
+                    for lt, vals in lat_map.items():
+                        for v in vals:
+                            storage.add_block_latency(block_hash, lt, v)
+                except Exception:
+                    # best-effort: continue
+                    pass
+
+            for tx_dict in data.get("txs", {}).values():
+                tx_hash = tx_dict.get("hash")
+                rcv = tx_dict.get("received_timestamps", []) or []
+                packed = tx_dict.get("packed_timestamps", []) or []
+                ready = tx_dict.get("ready_pool_timestamps", []) or []
+                for ts in rcv:
+                    storage.add_tx_received(tx_hash, ts)
+                for ts in packed:
+                    if ts is not None:
+                        storage.add_tx_packed(tx_hash, ts)
+                for ts in ready:
+                    if ts is not None:
+                        storage.add_tx_ready(tx_hash, ts)
+
+            storage.commit()
+            return reducer
 
     @staticmethod
-    def reduced(log_dir:str, executor:ThreadPoolExecutor):
+    def reduced(log_dir:str, executor:ThreadPoolExecutor, storage: Optional[SqliteStorage] = None):
+        from loguru import logger
+        logger.info("Starting reduced() for {} with storage={}", log_dir, storage is not None)
         futures = []
         for (path, _, files) in os.walk(log_dir):
             for f in files:
                 if f == "conflux.log":
                     log_file = os.path.join(path, f)
-                    futures.append(executor.submit(NodeLogMapper.mapf, log_file))
+                    futures.append(executor.submit(NodeLogMapper.mapf, log_file, storage))
 
         reducer = HostLogReducer([])
+        processed = 0
         # process results as they become available to keep memory low
         for future in as_completed(futures):
             mapper = future.result()
             reducer.reduce_one(mapper)
+            processed += 1
+            if processed % 20 == 0:
+                logger.info("Reduced {} host mappers", processed)
             # explicitly drop reference to mapper to allow GC
             del mapper
 
+        logger.info("Finished reduced(); processed {} mappers", processed)
         return reducer
 
 
 class LogAggregator:
-    def __init__(self):
+    def __init__(self, storage: Optional[SqliteStorage] = None):
+        self.storage = storage
+
         self.blocks = {}
         self.txs = {}
         self.sync_cons_gap_stats = []
@@ -554,20 +670,20 @@ class LogAggregator:
     def add_host(self, host_log:HostLogReducer):
         self.sync_cons_gap_stats.extend(host_log.sync_cons_gap_stats)
 
+        # if using on-disk storage, raw block/tx bodies are stored there and we don't keep them in memory
+        if self.storage is None:
+            for b in host_log.blocks.values():
+                Block.add_or_merge(self.blocks, b)
 
-        for b in host_log.blocks.values():
-            Block.add_or_merge(self.blocks, b)
-        by_block_cnt = 0
+            for tx in host_log.txs.values():
+                Transaction.add_or_merge(self.txs, tx)
 
-        for tx in host_log.txs.values():
-            Transaction.add_or_merge(self.txs, tx)
+            for tx in host_log.txs.values():
+                if tx.packed_timestamps and tx.packed_timestamps[0] is not None:
+                    self.tx_wait_to_be_packed_time.append(tx.packed_timestamps[0] - min(tx.received_timestamps))
 
         # following data only work for one node per host
         self.host_by_block_ratio.extend(host_log.by_block_ratio)
-
-        for tx in host_log.txs.values():
-            if tx.packed_timestamps[0] is not None:
-                self.tx_wait_to_be_packed_time.append(tx.packed_timestamps[0] - min(tx.received_timestamps))
 
 
     def validate(self):
@@ -598,52 +714,177 @@ class LogAggregator:
 
         return Statistics(data)
 
-    def generate_latency_stat(self):
+    def generate_latency_stat(self, delete_after_read: bool = True):
         num_nodes = len(self.sync_cons_gap_stats)
 
-        for b in self.blocks.values():
-            for t in default_latency_keys:
-                latencies = b.get_latencies(t)
-                if only_pivot_event(t) and len(latencies) < int(0.9 * num_nodes):
+        if self.storage is not None:
+            # Stream blocks from storage one-by-one to compute stats and optionally free disk rows
+            default_names = [k.name for k in default_latency_keys]
+
+            # If sync_cons_gap_stats are missing (DB-only mode), try to infer the number of nodes
+            # from stored per-block latencies. This keeps the "90%" filter consistent with
+            # the in-memory path which depends on number of nodes.
+            if num_nodes == 0:
+                # sample a limited number of blocks to estimate node count (fast)
+                import itertools
+                block_hashes = list(itertools.islice(self.storage.iter_block_hashes(), 200))
+                inferred = 0
+                for bh in block_hashes:
+                    lat_map_tmp = self.storage.get_block_latencies(bh)
+                    for t in default_latency_keys:
+                        inferred = max(inferred, len(lat_map_tmp.get(t.name, [])))
+                if inferred > 0:
+                    num_nodes = inferred
+                # iterate all blocks for aggregation (we only sampled for inference)
+                iter_hashes = self.storage.iter_block_hashes()
+            else:
+                iter_hashes = self.storage.iter_block_hashes()
+
+            for block_hash in iter_hashes:
+                lat_map = self.storage.get_block_latencies(block_hash)
+
+                # default keys
+                for t in default_latency_keys:
+                    latencies = lat_map.get(t.name, [])
+                    if not latencies:
+                        continue
+                    if only_pivot_event(t) and len(latencies) < int(0.9 * num_nodes):
+                        continue
+                    self.block_latency_stats[t.name][block_hash] = Statistics(latencies)
+
+                # custom keys
+                for t_name, latencies in lat_map.items():
+                    if t_name in default_names:
+                        continue
+                    if len(latencies) < int(0.9 * num_nodes):
+                        continue
+                    if t_name not in self.block_latency_stats:
+                        self.block_latency_stats[t_name] = dict()
+                    self.block_latency_stats[t_name][block_hash] = Statistics(latencies)
+
+                # populate lightweight Block meta for DB-only inspection
+                try:
+                    meta = self.storage.get_block_meta(block_hash)
+                    if meta is not None:
+                        # create a minimal Block object to allow downstream stats (txs, size, timestamp, referees)
+                        b = Block(block_hash, None, meta['timestamp'], 0, meta.get('referees', []))
+                        b.txs = meta.get('txs', 0)
+                        b.size = meta.get('size', 0)
+                        self.blocks[block_hash] = b
+                except Exception:
+                    pass
+
+                # free raw rows for this block if requested
+                if delete_after_read:
+                    try:
+                        self.storage.delete_block_raw(block_hash)
+                    except Exception:
+                        pass
+
+            # transactions
+            for tx_hash in self.storage.iter_tx_hashes():
+                received = self.storage.get_tx_received(tx_hash)
+                if not received:
+                    # nothing useful
+                    if delete_after_read:
+                        try:
+                            self.storage.delete_tx_raw(tx_hash)
+                        except Exception:
+                            pass
                     continue
-                self.block_latency_stats[t.name][b.hash] = Statistics(latencies)
 
-            for (t_name, latencies) in b.iter_non_default_latencies():
-                if len(latencies) < int(0.9 * num_nodes):
-                    continue
-                if t_name not in self.block_latency_stats:
-                    self.block_latency_stats[t_name] = dict()
-                self.block_latency_stats[t_name][b.hash] = Statistics(latencies)
+                # convert to latencies (relative to min received)
+                min_rcv = min(received)
+                recv_latencies = [ts - min_rcv for ts in received]
+                if len(received) == num_nodes:
+                    self.tx_latency_stats[tx_hash] = Statistics(recv_latencies)
 
-            # free per-block latency lists after aggregation to reduce memory
-            b.latencies.clear()
+                packed = self.storage.get_tx_packed(tx_hash)
+                if packed:
+                    packed_latencies = [ts - min_rcv for ts in packed]
+                    self.tx_packed_to_block_latency[tx_hash] = Statistics(packed_latencies)
 
-        num_nodes = len(self.sync_cons_gap_stats)
-        for tx in self.txs.values():
-            if tx.latency_count() == num_nodes:
-                self.tx_latency_stats[tx.hash] = Statistics(tx.get_latencies())
-            if tx.packed_timestamps and tx.packed_timestamps[0] is not None:
-                self.tx_packed_to_block_latency[tx.hash] = Statistics(tx.get_packed_to_block_latencies())
+                    tx_latency = min(packed) - min_rcv
+                    if self.largest_min_tx_packed_latency_hash is not None:
+                        if self.largest_min_tx_packed_latency_time < tx_latency:
+                            self.largest_min_tx_packed_latency_hash = tx_hash
+                            self.largest_min_tx_packed_latency_time = tx_latency
+                    else:
+                        self.largest_min_tx_packed_latency_hash = tx_hash
+                        self.largest_min_tx_packed_latency_time = tx_latency
+                    self.min_tx_packed_to_block_latency.append(tx_latency)
 
-                tx_latency= tx.get_min_packed_to_block_latency()
-                if self.largest_min_tx_packed_latency_hash is not None:
-                    if self.largest_min_tx_packed_latency_time < tx_latency:
+                ready = self.storage.get_tx_ready(tx_hash)
+                if ready:
+                    self.min_tx_to_ready_pool_latency.append(min(ready) - min_rcv)
+
+                # delete raw tx rows to free disk if requested
+                if delete_after_read:
+                    try:
+                        self.storage.delete_tx_raw(tx_hash)
+                    except Exception:
+                        pass
+
+        else:
+            # in-memory path (existing behavior)
+            for b in self.blocks.values():
+                for t in default_latency_keys:
+                    latencies = b.get_latencies(t)
+                    if not latencies:
+                        continue
+                    if only_pivot_event(t) and len(latencies) < int(0.9 * num_nodes):
+                        continue
+                    self.block_latency_stats[t.name][b.hash] = Statistics(latencies)
+
+                for (t_name, latencies) in b.iter_non_default_latencies():
+                    if not latencies:
+                        continue
+                    if len(latencies) < int(0.9 * num_nodes):
+                        continue
+                    if t_name not in self.block_latency_stats:
+                        self.block_latency_stats[t_name] = dict()
+                    self.block_latency_stats[t_name][b.hash] = Statistics(latencies)
+
+                # free per-block latency lists after aggregation to reduce memory
+                try:
+                    b.latencies.clear()
+                except Exception:
+                    b.latencies = {}
+
+            for tx in self.txs.values():
+                if tx.latency_count() == num_nodes:
+                    self.tx_latency_stats[tx.hash] = Statistics(tx.get_latencies())
+                if tx.packed_timestamps and tx.packed_timestamps[0] is not None:
+                    self.tx_packed_to_block_latency[tx.hash] = Statistics(tx.get_packed_to_block_latencies())
+
+                    tx_latency= tx.get_min_packed_to_block_latency()
+                    if self.largest_min_tx_packed_latency_hash is not None:
+                        if self.largest_min_tx_packed_latency_time < tx_latency:
+                            self.largest_min_tx_packed_latency_hash = tx.hash
+                            self.largest_min_tx_packed_latency_time = tx_latency
+                    else:
                         self.largest_min_tx_packed_latency_hash = tx.hash
                         self.largest_min_tx_packed_latency_time = tx_latency
-                else:
-                    self.largest_min_tx_packed_latency_hash = tx.hash
-                    self.largest_min_tx_packed_latency_time = tx_latency
-                self.min_tx_packed_to_block_latency.append(tx_latency)
+                    self.min_tx_packed_to_block_latency.append(tx_latency)
 
-            if tx.ready_pool_timestamps[0] is not None:
-                self.min_tx_to_ready_pool_latency.append(tx.get_min_tx_to_ready_pool_latency())
-            # free per-transaction timestamp lists after statistics computed
-            tx.received_timestamps.clear()
-            tx.packed_timestamps.clear()
-            tx.ready_pool_timestamps.clear()
+                if tx.ready_pool_timestamps and tx.ready_pool_timestamps[0] is not None:
+                    self.min_tx_to_ready_pool_latency.append(tx.get_min_tx_to_ready_pool_latency())
+                # free per-transaction timestamp lists after statistics computed
+                try:
+                    tx.received_timestamps.clear()
+                    tx.packed_timestamps.clear()
+                    tx.ready_pool_timestamps.clear()
+                except Exception:
+                    tx.received_timestamps = []
+                    tx.packed_timestamps = []
+                    tx.ready_pool_timestamps = []
 
-        # drop raw tx objects to free memory; stats are preserved in separate dicts
-        self.txs.clear()
+            # drop raw tx objects to free memory; stats are preserved in separate dicts
+            try:
+                self.txs.clear()
+            except Exception:
+                self.txs = {}
+
 
     def get_largest_min_tx_packed_latency_hash(self):
         return self.largest_min_tx_packed_latency_hash
@@ -652,7 +893,9 @@ class LogAggregator:
         data = []
 
         for block_stat in self.block_latency_stats[t].values():
-            data.append(block_stat.get(p))
+            v = block_stat.get(p)
+            if v is not None:
+                data.append(v)
 
         return Statistics(data)
     
@@ -668,7 +911,9 @@ class LogAggregator:
         data = []
 
         for tx_stat in self.tx_latency_stats.values():
-            data.append(tx_stat.get(p))
+            v = tx_stat.get(p)
+            if v is not None:
+                data.append(v)
 
         return Statistics(data)
 
@@ -676,7 +921,9 @@ class LogAggregator:
         data =[]
 
         for tx_stat in self.tx_packed_to_block_latency.values():
-            data.append(tx_stat.get(p))
+            v = tx_stat.get(p)
+            if v is not None:
+                data.append(v)
 
         return Statistics(data)
 
@@ -693,28 +940,76 @@ class LogAggregator:
         return Statistics(self.tx_wait_to_be_packed_time)
 
     @staticmethod
-    def load(logs_dir):
-        agg = LogAggregator()
-        executor = ThreadPoolExecutor(max_workers=8)
+    def load(logs_dir, storage_db: Optional[str] = None, storage_kwargs: Optional[dict] = None, preserve_db: bool = False):
+        from loguru import logger
+        logger.info("LogAggregator.load start: {} storage_db={} storage_kwargs={} preserve_db={}", logs_dir, storage_db, storage_kwargs, preserve_db)
+        storage = (
+            SqliteStorage(storage_db, **(storage_kwargs or {}))
+            if storage_db is not None and SqliteStorage is not None
+            else None
+        )
+        agg = LogAggregator(storage)
+
+        # allow limiting worker count via environment to reduce resource usage during debugging
+        max_workers = os.getenv("ANALYZER_MAX_WORKERS")
+        try:
+            max_workers = int(max_workers) if max_workers is not None else 8
+        except Exception:
+            max_workers = 8
+        if max_workers < 1:
+            max_workers = 1
+
+        executor = ThreadPoolExecutor(max_workers=max_workers)
 
         futures = []
         for (path, _, files) in os.walk(logs_dir):
             for f in files:
                 if f == "blocks.log":
                     log_file = os.path.join(path, f)
-                    futures.append(executor.submit(HostLogReducer.loadf, log_file))
+                    futures.append(executor.submit(HostLogReducer.loadf, log_file, storage))
 
+        processed = 0
         # process host reducers as they complete to reduce peak memory
         for future in as_completed(futures):
             host = future.result()
             agg.add_host(host)
+            processed += 1
+            if processed % 10 == 0:
+                logger.info("Loaded {} host dumps", processed)
             del host
 
-        agg.validate()
-        agg.generate_latency_stat()
+        logger.info("Finished loading host dumps: {} processed", processed)
 
+        # reduce raw logs (conflux.log) into storage or memory
+        reducer_executor = ThreadPoolExecutor(max_workers=max_workers)
+        reducer = HostLogReducer.reduced(logs_dir, reducer_executor, storage)
+        # if no storage, reducer contains combined host data, so add it
+        if storage is None:
+            agg.add_host(reducer)
+        # else reducer primarily used to capture sync_cons_gap_stats and by_block_ratio
+        else:
+            # reducer already reduced sync/gap stats and by_block_ratio in its internal lists
+            agg.sync_cons_gap_stats.extend(reducer.sync_cons_gap_stats)
+            agg.host_by_block_ratio.extend(reducer.by_block_ratio)
+
+        if storage is not None:
+            storage.commit()
+
+        agg.validate()
+        # if preserve_db requested, do not delete raw rows during aggregation
+        agg.generate_latency_stat(delete_after_read=not preserve_db)
+
+        reducer_executor.shutdown()
         executor.shutdown()
 
+        if storage is not None:
+            # close storage after aggregation
+            try:
+                storage.close()
+            except Exception:
+                pass
+
+        logger.info("LogAggregator.load completed")
         return agg
 
 if __name__ == "__main__":
