@@ -648,6 +648,16 @@ class LogAggregator:
     def __init__(self, storage: Optional[SqliteStorage] = None):
         self.storage = storage
 
+    @staticmethod
+    def load_aggregator(storage):
+        from .in_memory_aggregator import InMemoryLogAggregator
+        from .db_aggregator import DBLogAggregator
+        return DBLogAggregator(storage) if storage is not None else InMemoryLogAggregator()
+
+    # NOTE: the old LogAggregator implementation is preserved for backward compatibility
+    # but operationally we prefer selecting a concrete implementation via load_aggregator()
+
+
         self.blocks = {}
         self.txs = {}
         self.sync_cons_gap_stats = []
@@ -949,7 +959,10 @@ class LogAggregator:
             if storage_db is not None and SqliteStorage is not None
             else None
         )
-        agg = LogAggregator(storage)
+        # choose concrete aggregator implementation
+        from .in_memory_aggregator import InMemoryLogAggregator
+        from .db_aggregator import DBLogAggregator
+        agg = DBLogAggregator(storage) if storage is not None else InMemoryLogAggregator()
 
         # allow limiting worker count via environment to reduce resource usage during debugging
         max_workers = os.getenv("ANALYZER_MAX_WORKERS")
@@ -984,14 +997,19 @@ class LogAggregator:
         # reduce raw logs (conflux.log) into storage or memory
         reducer_executor = ThreadPoolExecutor(max_workers=max_workers)
         reducer = HostLogReducer.reduced(logs_dir, reducer_executor, storage)
-        # if no storage, reducer contains combined host data, so add it
-        if storage is None:
+        # reducer contains combined host-level summaries; add to aggregator
+        try:
             agg.add_host(reducer)
-        # else reducer primarily used to capture sync_cons_gap_stats and by_block_ratio
-        else:
-            # reducer already reduced sync/gap stats and by_block_ratio in its internal lists
-            agg.sync_cons_gap_stats.extend(reducer.sync_cons_gap_stats)
-            agg.host_by_block_ratio.extend(reducer.by_block_ratio)
+        except Exception:
+            # fallback to manual extension for implementations that do not implement add_host
+            try:
+                agg.sync_cons_gap_stats.extend(reducer.sync_cons_gap_stats)
+            except Exception:
+                pass
+            try:
+                agg.host_by_block_ratio.extend(reducer.by_block_ratio)
+            except Exception:
+                pass
 
         if storage is not None:
             storage.commit()

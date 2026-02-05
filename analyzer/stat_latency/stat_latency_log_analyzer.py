@@ -117,7 +117,8 @@ class LogAnalyzer:
             print(f"DB contains {block_count} blocks and {tx_count} transactions")
 
             # build aggregator directly from storage and compute stats
-            self.agg = LogAggregator(storage)
+            # select DB-backed aggregator implementation
+            self.agg = LogAggregator.load_aggregator(storage)
             # do not delete raw rows when analyzing DB-only
             self.agg.generate_latency_stat(delete_after_read=False)
 
