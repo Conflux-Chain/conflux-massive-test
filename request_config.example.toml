@@ -73,6 +73,11 @@ name = "us-west-2"
 # count = 10
 
 [[aws.regions]]
+# 中国香港
+name = "ap-east-1"
+count = 10
+
+[[aws.regions]]
 # 巴林
 name = "me-south-1"
 count = 10
@@ -86,7 +91,7 @@ count = 10
 # 巴西（圣保罗）
 # 25 年 5 月加入“一带一路”
 name = "sa-east-1"
-count = 10
+# count = 10
 
 [[aws.instance_types]]
 name = "m6i.2xlarge"

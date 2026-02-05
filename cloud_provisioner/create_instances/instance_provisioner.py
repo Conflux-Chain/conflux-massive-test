@@ -48,7 +48,7 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, *, regio
 
         # Submit any returned instances to verifier so they're tracked (prevents over-creation)
         if len(instance_ids) > 0:
-            verifier.submit_pending_instances(instance_ids, instance_type)
+            verifier.submit_pending_instances(instance_ids, instance_type, zone_info.id)
 
         if len(instance_ids) < hosts_to_request:
             # 当前实例组合可用已经耗尽，尝试下一组
@@ -70,6 +70,7 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, *, regio
                      ssh_key_path=region_info.key_path,
                      provider=provider,
                      region=region_info.id,
+                     zone=instance.zone_id,
                      instance_id=instance.instance_id)
             for (instance, ip) in ready_instances]
 
@@ -85,6 +86,6 @@ def _try_create_in_single_zone(client: IEcsClient, verifier: InstanceVerifier, c
             logger.warning(
                 f"Only partial create instance success, even if minimum required ({region_info.id}/{zone_info.id})")
         else:
-            verifier.submit_pending_instances(ids, instance_type)
+            verifier.submit_pending_instances(ids, instance_type, zone_info.id)
             # 无论这些实例是否都成功，不会再走 create_in_single_zone 的逻辑
             return

@@ -10,11 +10,12 @@ from typing import List, Optional
 class HostSpec:
     ip: str
     nodes_per_host: int
-    ssh_user: str = "root"
-    ssh_key_path: Optional[str] = None
-    provider: Optional[str] = None
-    region: Optional[str] = None
-    instance_id: Optional[str] = None
+    ssh_user: str
+    ssh_key_path: str
+    provider: str
+    region: str
+    zone: str
+    instance_id: str
 
     
 def save_hosts(hosts: List[HostSpec], file_path: str):

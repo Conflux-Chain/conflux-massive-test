@@ -29,6 +29,7 @@ class InstanceType:
 @dataclass(frozen=True)
 class Instance:
     instance_id: str
+    zone_id: str
     type: InstanceType
 
 @dataclass

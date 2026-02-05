@@ -37,9 +37,9 @@ class InstanceVerifier:
         self._lock = threading.RLock()
         self._running_queue = Queue(maxsize=10000)
 
-    def submit_pending_instances(self, ids: List[str], type: InstanceType):
+    def submit_pending_instances(self, ids: List[str], type: InstanceType, zone_id: str):
         self.pending_instances.update(
-            {id: Instance(instance_id=id, type=type) for id in ids})
+            {id: Instance(instance_id=id, type=type, zone_id=zone_id) for id in ids})
 
     @property
     def ready_nodes(self):
