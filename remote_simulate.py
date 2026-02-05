@@ -147,7 +147,7 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a Conflux simulation on provisioned cloud instances")
-    parser.add_argument("--topology", choices=["random", "group-aware", "centralized", "min-peers"], default="random", help="Topology strategy to use")
+    parser.add_argument("--topology", choices=["random", "group-aware", "centralized", "min-peers", "small-world"], default="random", help="Topology strategy to use")
     parser.add_argument("--log-prefix", default="logs", help="Base directory prefix for logs")
     args = parser.parse_args()
 
@@ -229,6 +229,15 @@ if __name__ == "__main__":
     elif args.topology == "min-peers":
         from remote_simulation.min_peers_topology import generate_min_peer_topology
         topology = generate_min_peer_topology(
+            nodes,
+            out_degree=simulation_config.connect_peers,
+            in_degree=64,
+            latency_min=0,
+            latency_max=0,
+        )
+    elif args.topology == "small-world":
+        from remote_simulation.small_world_topology import generate_small_world_topology
+        topology = generate_small_world_topology(
             nodes,
             out_degree=simulation_config.connect_peers,
             in_degree=64,
