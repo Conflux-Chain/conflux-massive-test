@@ -1,5 +1,5 @@
 import argparse
-from analysis.stat_latency import LogAnalyzer
+from analyzer.stat_latency.stat_latency_log_analyzer import LogAnalyzer
 
 
 def main():
