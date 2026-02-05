@@ -51,6 +51,7 @@ mkdir -p $LOG_PATH
 # --- 步骤 1: 创建实例 ---
 print_separator "步骤 1/3: 创建云服务实例..."
 $PYTHON -m cloud_provisioner.create_instances
+cp request_config.toml $LOG_PATH
 
 # --- 步骤 2: 远程模拟 ---
 print_separator "步骤 2/3: 开始远程模拟..."

@@ -14,6 +14,12 @@ name = "ap-southeast-1"
 # count 设为 0 或者注释掉可以跳过区域
 count = 10
 
+# 尝试在同一个 zone 申请全部节点的阈值，count 超出则直接开始多 zone 尝试，默认 50
+# zone_max_nodes = 50
+
+# 每次 API 调用最多申请节点数量，0 代表没有上限。
+# max_nodes = 0
+
 [[aliyun.regions]]
 # 韩国（首尔）
 name = "ap-northeast-2"
