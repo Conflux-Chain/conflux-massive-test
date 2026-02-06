@@ -615,9 +615,6 @@ class LogAggregator:
                     self.block_latency_stats[t_name] = dict()
                 self.block_latency_stats[t_name][b.hash] = Statistics(latencies)
 
-            # free per-block latency lists after aggregation to reduce memory
-            b.latencies.clear()
-
         num_nodes = len(self.sync_cons_gap_stats)
         for tx in self.txs.values():
             if tx.latency_count() == num_nodes:
@@ -637,13 +634,7 @@ class LogAggregator:
 
             if tx.ready_pool_timestamps[0] is not None:
                 self.min_tx_to_ready_pool_latency.append(tx.get_min_tx_to_ready_pool_latency())
-            # free per-transaction timestamp lists after statistics computed
-            tx.received_timestamps.clear()
-            tx.packed_timestamps.clear()
-            tx.ready_pool_timestamps.clear()
 
-        # drop raw tx objects to free memory; stats are preserved in separate dicts
-        self.txs.clear()
 
     def get_largest_min_tx_packed_latency_hash(self):
         return self.largest_min_tx_packed_latency_hash
