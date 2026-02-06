@@ -76,6 +76,7 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
 
     ready_instances = verifier.copy_ready_instances()
     return [HostSpec(ip=ip,
+                     private_ip=private_ip,
                      nodes_per_host=instance.type.nodes,
                      ssh_user=ssh_user,
                      ssh_key_path=region_info.key_path,
@@ -83,7 +84,7 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
                      region=region_info.id,
                      zone=instance.zone_id,
                      instance_id=instance.instance_id)
-            for (instance, ip) in ready_instances]
+            for (instance, ip, private_ip) in ready_instances]
 
 
 def _try_create_in_single_zone(client: IEcsClient, verifier: InstanceVerifier, cfg: InstanceConfig, region_info: RegionInfo, instance_type: InstanceType, amount: int):
