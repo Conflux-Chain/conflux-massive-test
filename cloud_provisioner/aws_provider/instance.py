@@ -121,12 +121,7 @@ def describe_instance_status(client: EC2Client, instance_ids: List[str]):
                 if status == 'running':
                     public_ip = instance.get('PublicIpAddress')
                     private_ip = instance.get('PrivateIpAddress')
-
-                    # If public ip is not ready yet, keep it pending for SSH checks
-                    if not public_ip or not private_ip:
-                        pending_instances.add(instance_id)
-                    else:
-                        running_instances[instance_id] = (public_ip, private_ip)
+                    running_instances[instance_id] = (public_ip, private_ip)
                 elif status in ['pending', 'stopped']:
                     pending_instances.add(instance_id)
         

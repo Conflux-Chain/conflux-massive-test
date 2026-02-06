@@ -98,20 +98,8 @@ def describe_instance_status(client: Client, region_id: str, instance_ids: List[
         for instance in instance_status:
             if instance.status not in ["Running"]:
                 continue
-
-            public_ip = None
-            if instance.public_ip_address and instance.public_ip_address.ip_address:
-                public_ip = instance.public_ip_address.ip_address[0]
-
-            private_ip = None
-            vpc_private_ips = None
-            if instance.vpc_attributes and instance.vpc_attributes.private_ip_address:
-                vpc_private_ips = instance.vpc_attributes.private_ip_address.ip_address
-            if vpc_private_ips:
-                private_ip = vpc_private_ips[0]
-            elif instance.inner_ip_address and instance.inner_ip_address.ip_address:
-                private_ip = instance.inner_ip_address.ip_address[0]
-
+            public_ip = instance.public_ip_address.ip_address[0]
+            private_ip = instance.vpc_attributes.private_ip_address.ip_address[0] or instance.inner_ip_address.ip_address[0]
             running_instances[instance.instance_id] = (public_ip, private_ip)
         
         # 阿里云启动阶段也可能读到 instance 是 stopped 的状态
