@@ -98,9 +98,6 @@ class LogAnalyzer:
     def analyze(self):
         self.agg = LogDirectoryLoader(self.log_dir).load()
 
-        print("{} nodes in total".format(len(self.agg.sync_cons_gap_stats)))
-        print("{} blocks generated".format(len(self.agg.blocks)))
-
         self.agg.validate()
         self.agg.generate_latency_stat()
         self._generate_report()

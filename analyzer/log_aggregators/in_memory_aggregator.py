@@ -28,6 +28,9 @@ class InMemoryLogAggregator(LogAggregator):
         except Exception:
             pass
     def validate(self):
+        print("{} nodes in total".format(len(self.sync_cons_gap_stats)))
+        print("{} blocks generated".format(len(self.blocks)))
+
         num_nodes = len(self.sync_cons_gap_stats)
 
         for block_hash in list(self.blocks.keys()):
