@@ -1,78 +1,23 @@
 import sys
-import csv
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
-from loguru import logger
-from prettytable import PrettyTable
-from .stat_latency_map_reduce import BlockLatencyType, BlockEventRecordType, Percentile, Statistics, HostLogReducer, LogAggregator
 
-class Table:
-    def __init__(self, header:list):
-        self.header = header
-        self.rows = []
+from analyzer.log_loaders.log_loaders import LogDirectoryLoader
+from analyzer.log_utils.data_utils import (
+    BlockEventRecordType,
+    BlockLatencyType,
+    Percentile,
+    Statistics,
+)
+from analyzer.log_utils.table import Table
 
-    def add_row(self, row:list):
-        assert len(row) == len(self.header), "row and header length mismatch"
-        self.rows.append(row)
-
-    def pretty_print(self):
-        table = PrettyTable()
-        table.field_names = self.header
-
-        for row in self.rows:
-            table.add_row(row)
-
-        print(table)
-
-    def output_csv(self, output_file:str):
-        with open(output_file, "w", newline='') as fp:
-            writer = csv.writer(fp)
-            writer.writerow(self.header)
-            for row in self.rows:
-                writer.writerow(row)
-
-    @staticmethod
-    def new_matrix(name:str):
-        header = [name]
-
-        for p in Percentile:
-            if p is not Percentile.Min:
-                header.append(p.name)
-
-        return Table(header)
-
-    def add_data(self, name:str, data_format:str, data:list):
-        self.add_stat(name, data_format, Statistics(data))
-
-    def add_stat(self, name:str, data_format:str, stat:Statistics):
-        try:
-            row = [name]
-
-            for p in Percentile:
-                if p in [Percentile.Avg, Percentile.Cnt]:
-                    row.append(stat.get(p))
-                elif p is not Percentile.Min:
-                    row.append(stat.get(p, data_format))
-
-            self.add_row(row)
-        except Exception as e:
-            logger.warning(f"Cannot add stat for '{name}': {e}, {stat.__dict__}")
 
 class LogAnalyzer:
-    def __init__(self, stat_name:str, log_dir:str, csv_output: Optional[str]=None):
+    def __init__(self, stat_name: str, log_dir: str, csv_output: Optional[str] = None):
         self.stat_name = stat_name
         self.log_dir = log_dir
         self.csv_output = csv_output
 
-    def analyze(self):
-        self.agg = LogAggregator.load(self.log_dir)
-
-        print("{} nodes in total".format(len(self.agg.sync_cons_gap_stats)))
-        print("{} blocks generated".format(len(self.agg.blocks)))
-
-        self.agg.validate()
-        self.agg.generate_latency_stat()
-
+    def _generate_report(self):
         table = Table.new_matrix(self.stat_name)
 
         for t in BlockLatencyType:
@@ -90,29 +35,18 @@ class LogAnalyzer:
                 name = "custom block event elapsed ({}/{})".format(t_name, p.name)
                 table.add_stat(name, "%.2f", self.agg.stat_block_latency(t_name, p))
 
-
         if len(self.agg.tx_latency_stats) != 0:
-            #self.agg.stat_tx_latency prints: row: to propagate to P(n) number of nodes, column: Percentage of the transactions.
             for p in Percentile.node_percentiles():
                 name = "tx broadcast latency ({})".format(p.name)
                 table.add_stat(name, "%.2f", self.agg.stat_tx_latency(p))
 
-            #row: the P(n) time the transaction is packed into a block. Column: Percentage of the transactions.
             for p in Percentile.node_percentiles():
-                name_tx_packed_to_block ="tx packed to block latency ({})".format(p.name)
+                name_tx_packed_to_block = "tx packed to block latency ({})".format(p.name)
                 table.add_stat(name_tx_packed_to_block, "%.2f", self.agg.stat_tx_packed_to_block_latency(p))
 
-            #the first time a transaction is packed to the first time the transaction is geneated.
             table.add_stat("min tx packed to block latency", "%.2f", self.agg.stat_min_tx_packed_to_block_latency())
-
-            #the time between the node receives the tx and the tx first time becomes ready
             table.add_stat("min tx to ready pool latency", "%.2f", self.agg.stat_min_tx_to_ready_pool_latency())
-
-            #colomn: P(n) nodes: percentage of the transactions is received by block.
             table.add_stat("by_block_ratio", "%.2f", self.agg.stat_tx_ratio())
-
-            #colomn: shows the time a transaction from receiving to packing for every node, be aware of the transactions can be packed multiple times.
-            #Therefore there may be mutiple values for the same transaction.
             table.add_stat("Tx wait to be packed elasped time", "%.2f", self.agg.stat_tx_wait_to_be_packed())
 
         block_txs_list = []
@@ -120,13 +54,12 @@ class LogAnalyzer:
         block_timestamp_list = []
         referee_count_list = []
         max_time = 0
-        min_time = 10 ** 40
+        min_time = 10**40
         for block in self.agg.blocks.values():
             block_txs_list.append(block.txs)
             block_size_list.append(block.size)
             block_timestamp_list.append(block.timestamp)
             referee_count_list.append(len(block.referees))
-            # Ignore the empty warm-up blocks at the start
             if block.txs > 0:
                 ts = block.timestamp
                 if ts < min_time:
@@ -141,7 +74,7 @@ class LogAnalyzer:
         block_timestamp_list.sort()
         intervals = []
         for i in range(1, len(block_timestamp_list)):
-            intervals.append(block_timestamp_list[i] - block_timestamp_list[i-1])
+            intervals.append(block_timestamp_list[i] - block_timestamp_list[i - 1])
         table.add_data("block generation interval", "%.2f", intervals)
 
         for p in [Percentile.Avg, Percentile.P50, Percentile.P90, Percentile.P99, Percentile.Max]:
@@ -157,9 +90,21 @@ class LogAnalyzer:
         slowest_tx_latency = self.agg.get_largest_min_tx_packed_latency_hash()
         if slowest_tx_latency is not None:
             print("Slowest packed transaction hash: {}".format(slowest_tx_latency))
+
         table.pretty_print()
         if self.csv_output is not None:
             table.output_csv(self.csv_output)
+
+    def analyze(self):
+        self.agg = LogDirectoryLoader(self.log_dir).load()
+
+        print("{} nodes in total".format(len(self.agg.sync_cons_gap_stats)))
+        print("{} blocks generated".format(len(self.agg.blocks)))
+
+        self.agg.validate()
+        self.agg.generate_latency_stat()
+        self._generate_report()
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
@@ -167,5 +112,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     csv_output = None if len(sys.argv) == 3 else sys.argv[3]
-
     LogAnalyzer(sys.argv[1], sys.argv[2], csv_output).analyze()
