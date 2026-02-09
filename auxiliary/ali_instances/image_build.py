@@ -152,31 +152,6 @@ async def _connect_with_retry(host: str, *, ssh_user: str, ssh_key_path: str, ti
     raise RuntimeError(f"SSH not stable for {host} within timeout; last error: {last_exc}")
 
 
-async def _install_docker_and_pull_from_registry(host: str, ssh_user: str, ssh_key_path: str, registry: str) -> None:
-    conn = await _connect_with_retry(host, ssh_user=ssh_user, ssh_key_path=ssh_key_path, timeout=300)
-    async with conn:
-        # Docker
-        await _remote_run(conn, "sudo apt-get update -y")
-        await _remote_run(conn, "sudo apt-get install -y docker.io ca-certificates curl")
-        await _remote_run(conn, "sudo systemctl enable --now docker")
-
-        # Allow pulling from insecure registry (simplest; TLS not configured here)
-        daemon_json = (
-            '{\n'
-            f'  "insecure-registries": ["{registry}"]\n'
-            '}\n'
-        )
-        await _remote_run(conn, "sudo mkdir -p /etc/docker")
-        await _remote_run(conn, f"printf %s {shlex.quote(daemon_json)} | sudo tee /etc/docker/daemon.json > /dev/null")
-        await _remote_run(conn, "sudo systemctl restart docker")
-
-        # Pull from builder registry
-        await _remote_run(conn, f"sudo docker pull {registry}/{LOCAL_CONFLUX_TAG}")
-
-        # Smoke-run container (best effort)
-        await _remote_run(conn, f"sudo docker run --rm {registry}/{LOCAL_CONFLUX_TAG} /bin/sh -c 'echo ok' || sudo docker run --rm {registry}/{LOCAL_CONFLUX_TAG} /bin/bash -lc 'echo ok'", check=False)
-
-
 def _load_request_config() -> tuple[str, str, str]:
     with open(REQUEST_CONFIG_PATH, "rb") as f:
         data = tomllib.load(f)
