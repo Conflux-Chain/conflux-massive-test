@@ -97,8 +97,9 @@ def create_instances_in_zone(
     req.SecurityGroupIds = [region_info.security_group_id]
     req.TagSpecification = [tag_spec]
 
-    if allow_partial_success:
-        req.MinCount = 1
+    # if allow_partial_success:
+    #     # 参数 `MinCount` 需要开名单才可以使用
+    #     req.MinCount = 1
 
     try:
         resp = client.RunInstances(req)
@@ -172,13 +173,16 @@ def get_instances_with_tag(client: CvmClient) -> List[InstanceInfoWithTag]:
 
 
 def delete_instances(client: CvmClient, instances_ids: List[str]):
+    # logger.info(f"Deleting {len(instances_ids)} instances: {instances_ids}")
     for i in range(0, len(instances_ids), 100):
         chunks = instances_ids[i:i + 100]
+        # logger.info(f"Deleting chunk: {chunks}")
         while True:
             try:
                 req = cvm_models.TerminateInstancesRequest()
                 req.InstanceIds = chunks
                 client.TerminateInstances(req)
+                logger.success(f"Successfully deleted instances: {chunks}")
                 break
             except TencentCloudSDKException as e:
                 logger.error(f"Cannot delete: {e}")

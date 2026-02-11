@@ -31,7 +31,9 @@ AWS_REGIONS = [
     "me-south-1",  # Bahrain
 ]
 TENCENT_REGIONS = [
+    "ap-hongkong",
     "ap-singapore",  # Singapore
+    "ap-bangkok",
     "ap-jakarta",    # Jakarta
     "ap-seoul",      # Seoul
 ]

@@ -133,8 +133,8 @@ if __name__ == "__main__":
             sys.exit(1)
     
     if not args.network_only:
-        total_nodes = config.aws.total_nodes + config.aliyun.total_nodes
-        logger.success(f"计划启动 {total_nodes} 个节点，aws {config.aws.total_nodes}, aliyun {config.aliyun.total_nodes}")
+        total_nodes = config.aws.total_nodes + config.aliyun.total_nodes + config.tencent.total_nodes
+        logger.success(f"计划启动 {total_nodes} 个节点，aws {config.aws.total_nodes}, aliyun {config.aliyun.total_nodes}, tencent {config.tencent.total_nodes}")
         
     if config.tencent.total_nodes > 0:
         tencent_client = TencentClient.load_from_env()

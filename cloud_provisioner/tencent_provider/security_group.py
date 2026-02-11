@@ -61,16 +61,25 @@ def create_security_group(client: VpcClient, vpc_id: str, security_group_name: s
     security_group_id = rep.SecurityGroup.SecurityGroupId
     assert isinstance(security_group_id, str)
 
-    policy_set = vpc_models.SecurityGroupPolicySet()
-    policy_set.Ingress = [
+    # Create ingress rules
+    ingress_policy_set = vpc_models.SecurityGroupPolicySet()
+    ingress_policy_set.Ingress = [
         _allow_ingress_policy("22"),
         _allow_ingress_policy("1024-49151"),
     ]
-    policy_set.Egress = [_allow_all_egress()]
 
-    policy_req = vpc_models.CreateSecurityGroupPoliciesRequest()
-    policy_req.SecurityGroupId = security_group_id
-    policy_req.SecurityGroupPolicySet = policy_set
-    client.CreateSecurityGroupPolicies(policy_req)
+    ingress_policy_req = vpc_models.CreateSecurityGroupPoliciesRequest()
+    ingress_policy_req.SecurityGroupId = security_group_id
+    ingress_policy_req.SecurityGroupPolicySet = ingress_policy_set
+    client.CreateSecurityGroupPolicies(ingress_policy_req)
+
+    # Create egress rules
+    egress_policy_set = vpc_models.SecurityGroupPolicySet()
+    egress_policy_set.Egress = [_allow_all_egress()]
+
+    egress_policy_req = vpc_models.CreateSecurityGroupPoliciesRequest()
+    egress_policy_req.SecurityGroupId = security_group_id
+    egress_policy_req.SecurityGroupPolicySet = egress_policy_set
+    client.CreateSecurityGroupPolicies(egress_policy_req)
 
     return security_group_id
