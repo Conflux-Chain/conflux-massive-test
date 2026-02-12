@@ -75,12 +75,15 @@ if __name__ == "__main__":
     configure_logger()
 
 
-    check_user_prefix_with_config_file(args.config, args.user_prefix, args.yes)
+    if not args.no_check:
+        check_user_prefix_with_config_file(args.config, args.user_prefix, args.yes)
+        
     check_empty_user_prefix(args.user_prefix, args.yes, f"Empty --user-prefix will match ALL instances (filtered only by common tag: '{DEFAULT_COMMON_TAG_KEY}={DEFAULT_COMMON_TAG_VALUE}')!")
 
     aliyun_client = AliyunClient.load_from_env()
     aws_client = AwsClient.new()
     tencent_client = TencentClient.load_from_env()
+    
     user_prefix = args.user_prefix
 
     with ThreadPoolExecutor() as executor:

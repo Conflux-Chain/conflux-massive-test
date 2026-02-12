@@ -35,7 +35,7 @@ class InfraRequest:
         infra_tag = f"conflux-massive-test-{config.user_tag}"
         # Use shorter key pair name for Tencent Cloud to avoid 25-character limit and use underscores instead of hyphens
         if config.provider == "tencent":
-            key_pair_name = f"cfx_test_{config.user_tag}"
+            key_pair_name = f"cfx_test_{config.get_key_pair_tag()}"
         else:
             key_pair_name = infra_tag
         return InfraRequest(region_ids=[r.name for r in config.regions],
