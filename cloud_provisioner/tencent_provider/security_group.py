@@ -24,7 +24,11 @@ def get_security_groups_in_region(client: VpcClient, vpc_id: str) -> List[Securi
         resp = client.DescribeSecurityGroups(req)
 
         if resp.SecurityGroupSet:
-            result.extend([as_security_group_info(sg) for sg in resp.SecurityGroupSet])
+            result.extend([
+                as_security_group_info(sg)
+                for sg in resp.SecurityGroupSet
+                if getattr(sg, "VpcId", None) == vpc_id
+            ])
 
         if resp.TotalCount is None or resp.TotalCount <= offset + limit:
             break
