@@ -12,6 +12,7 @@ from cloud_provisioner.args_check import check_user_prefix_with_config_file, che
 from cloud_provisioner.create_instances.types import VpcInfo
 from ..aliyun_provider.client_factory import AliyunClient
 from ..aws_provider.client_factory import AwsClient
+from ..tencent_provider.client_factory import TencentClient
 from ..provider_interface import IEcsClient
 
 
@@ -31,18 +32,28 @@ AWS_DEFAULT_REGIONS = [
     "af-south-1",  # Cape Town
     "me-south-1",  # Bahrain
 ]
+TENCENT_DEFAULT_REGIONS = [
+    "ap-hongkong",
+    "ap-singapore",  # Singapore
+    "ap-bangkok",
+    "ap-jakarta",    # Jakarta
+    "me-saudi-arabia",  # Riyadh
+    "ap-seoul",      # Seoul
+    "sa-saopaulo",   # São Paulo
+]
 
 
-def _load_regions_from_config(config_file: str) -> Tuple[List[str], List[str]]:
+def _load_regions_from_config(config_file: str) -> Tuple[List[str], List[str], List[str]]:
     if config_file == "":
-        return ALI_DEFAULT_REGIONS, AWS_DEFAULT_REGIONS
+        return ALI_DEFAULT_REGIONS, AWS_DEFAULT_REGIONS, TENCENT_DEFAULT_REGIONS
     with open(config_file, "rb") as f:
         data = tomllib.load(f)
         config = ProvisionConfig(**data)
     aliyun_regions = [region.name for region in config.aliyun.regions]
     aws_regions = [region.name for region in config.aws.regions]
+    tencent_regions = [region.name for region in config.tencent.regions]
 
-    return aliyun_regions, aws_regions
+    return aliyun_regions, aws_regions, tencent_regions
 
 
 def _delete_vpcs_in_region(
@@ -103,10 +114,11 @@ if __name__ == "__main__":
         check_user_prefix_with_config_file(args.config, args.user_prefix, args.yes)
     check_empty_user_prefix(args.user_prefix, args.yes, f"Empty --user-prefix will match ALL VPCs with name prefix '{vpc_name_prefix}')!")
 
-    aliyun_regions, aws_regions = _load_regions_from_config(args.config)
+    aliyun_regions, aws_regions, tencent_regions = _load_regions_from_config(args.config)
 
     aliyun_client = AliyunClient.load_from_env()
     aws_client = AwsClient.new()
+    tencent_client = TencentClient.load_from_env()
 
     predicate = lambda vpc: vpc.vpc_name.startswith(vpc_name_prefix)
 
@@ -114,5 +126,6 @@ if __name__ == "__main__":
         futures = [
             executor.submit(delete_vpcs, aliyun_client, aliyun_regions, predicate=predicate),
             executor.submit(delete_vpcs, aws_client, aws_regions, predicate=predicate),
+            executor.submit(delete_vpcs, tencent_client, tencent_regions, predicate=predicate),
         ]
         wait(futures)
