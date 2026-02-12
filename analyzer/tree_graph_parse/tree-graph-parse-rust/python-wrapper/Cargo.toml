@@ -1,0 +1,18 @@
+[package]
+name = "python-wrapper"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tg_parse_rpy"
+crate-type = ["cdylib"]  # 必须生成动态库
+
+[dependencies]
+tree-graph-parse-rust = { workspace = true }  
+pyo3 = { version = "0.20", features = ["extension-module", "generate-import-lib"] }
+ethereum-types = { workspace = true }
+hex = { workspace = true }  
+
+[package.metadata.maturin]
+python-source = "python"
+generate-typing = true

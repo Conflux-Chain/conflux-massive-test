@@ -5,7 +5,7 @@ import dateutil.parser
 import json
 import enum
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 def parse_value(log_line:str, prefix:str, suffix:str):
@@ -304,19 +304,20 @@ class Block:
         
         for t in BlockEventRecordType:
             if t in record.records:
-                self.latencies[t.name].append(record.records[t])
+                # ensure key exists then append value
+                self.latencies.setdefault(t.name, []).append(record.records[t])
 
         for t in record.custom_records:
-            if t not in self.latencies:
-                self.latencies[t.name] = []
-            self.latencies[t.name].append(record.custom_records[t])
+            self.latencies.setdefault(t.name, []).append(record.custom_records[t])
 
 
     def latency_count(self, t:BlockLatencyType):
-        return len(self.latencies[t.name])
+        # tolerate missing latency keys (e.g., when loading older dumps)
+        return len(self.latencies.get(t.name, []))
 
     def get_latencies(self, t:BlockLatencyType):
-        return self.latencies[t.name]
+        # return an empty list when missing
+        return self.latencies.get(t.name, [])
 
     def iter_non_default_latencies(self):
         default_latency_key_names = [key.name for key in default_latency_keys]
@@ -393,8 +394,8 @@ class NodeLogMapper:
 
     def map(self):
         with open(self.log_file, "r", encoding='UTF-8') as file:
-            for line in file.readlines():
-                    self.parse_log_line(line)
+            for line in file:
+                self.parse_log_line(line)
 
     def parse_log_line(self, line:str):
         if "transaction received by block" in line:
@@ -437,16 +438,26 @@ class HostLogReducer:
         self.sync_cons_gap_stats = []
         self.by_block_ratio = []
 
+    def reduce_one(self, mapper):
+        """Reduce a single NodeLogMapper into this reducer and free mapper memory."""
+        self.sync_cons_gap_stats.append(Statistics(mapper.sync_cons_gaps))
+        self.by_block_ratio.extend(mapper.by_block_ratio)
+
+        for b in mapper.blocks.values():
+            Block.add_or_merge(self.blocks, b)
+
+        for tx in mapper.txs.values():
+            Transaction.add_or_merge(self.txs, tx)
+
+        # free memory held by mapper
+        mapper.blocks.clear()
+        mapper.txs.clear()
+        mapper.by_block_ratio.clear()
+        mapper.sync_cons_gaps.clear()
+
     def reduce(self):
         for mapper in self.node_mappers:
-            self.sync_cons_gap_stats.append(Statistics(mapper.sync_cons_gaps))
-            self.by_block_ratio.extend(mapper.by_block_ratio)
-
-            for b in mapper.blocks.values():
-                Block.add_or_merge(self.blocks, b)
-
-            for tx in mapper.txs.values():
-                Transaction.add_or_merge(self.txs, tx)
+            self.reduce_one(mapper)
 
     def dump(self, output_file:str):
         data = {
@@ -508,13 +519,14 @@ class HostLogReducer:
                     log_file = os.path.join(path, f)
                     futures.append(executor.submit(NodeLogMapper.mapf, log_file))
 
-        mappers = []
-        for f in futures:
-            mappers.append(f.result())
+        reducer = HostLogReducer([])
+        # process results as they become available to keep memory low
+        for future in as_completed(futures):
+            mapper = future.result()
+            reducer.reduce_one(mapper)
+            # explicitly drop reference to mapper to allow GC
+            del mapper
 
-        # reduce logs for host
-        reducer = HostLogReducer(mappers)
-        reducer.reduce()
         return reducer
 
 
@@ -603,28 +615,26 @@ class LogAggregator:
                     self.block_latency_stats[t_name] = dict()
                 self.block_latency_stats[t_name][b.hash] = Statistics(latencies)
 
-
         num_nodes = len(self.sync_cons_gap_stats)
         for tx in self.txs.values():
             if tx.latency_count() == num_nodes:
                 self.tx_latency_stats[tx.hash] = Statistics(tx.get_latencies())
-            if tx.packed_timestamps[0] is not None:
+            if tx.packed_timestamps and tx.packed_timestamps[0] is not None:
                 self.tx_packed_to_block_latency[tx.hash] = Statistics(tx.get_packed_to_block_latencies())
 
                 tx_latency= tx.get_min_packed_to_block_latency()
                 if self.largest_min_tx_packed_latency_hash is not None:
-                    if self.largest_min_tx_packed_latency_time <tx_latency:
-                        self.largest_min_tx_packed_latency_hash=tx.hash
-                        self.largest_min_tx_packed_latency_time=tx_latency
+                    if self.largest_min_tx_packed_latency_time < tx_latency:
+                        self.largest_min_tx_packed_latency_hash = tx.hash
+                        self.largest_min_tx_packed_latency_time = tx_latency
                 else:
-                    self.largest_min_tx_packed_latency_hash=tx.hash
-                    self.largest_min_tx_packed_latency_time=tx_latency
+                    self.largest_min_tx_packed_latency_hash = tx.hash
+                    self.largest_min_tx_packed_latency_time = tx_latency
                 self.min_tx_packed_to_block_latency.append(tx_latency)
 
             if tx.ready_pool_timestamps[0] is not None:
                 self.min_tx_to_ready_pool_latency.append(tx.get_min_tx_to_ready_pool_latency())
-            # else:
-            #     print(tx.__dict__)
+
 
     def get_largest_min_tx_packed_latency_hash(self):
         return self.largest_min_tx_packed_latency_hash
@@ -685,8 +695,11 @@ class LogAggregator:
                     log_file = os.path.join(path, f)
                     futures.append(executor.submit(HostLogReducer.loadf, log_file))
 
-        for f in futures:
-            agg.add_host(f.result())
+        # process host reducers as they complete to reduce peak memory
+        for future in as_completed(futures):
+            host = future.result()
+            agg.add_host(host)
+            del host
 
         agg.validate()
         agg.generate_latency_stat()

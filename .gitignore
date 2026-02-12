@@ -2,10 +2,19 @@
 keys/*
 /ref
 
-ali_servers.json
 hosts.json
-instances.pkl
+request_config.toml
 logs/
+
+# --- Rust 规则 ---
+# 编译输出
+/analyzer/tree_graph_parse/target/
+**/*.rs.bk
+*.so
+
+# 调试信息
+*.d
+*.dSYM/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

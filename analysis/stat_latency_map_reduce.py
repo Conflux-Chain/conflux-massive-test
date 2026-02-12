@@ -1,1 +1,0 @@
-../node_docker_image/scripts/stat_latency_map_reduce.py

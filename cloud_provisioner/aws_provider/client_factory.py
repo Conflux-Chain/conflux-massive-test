@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import boto3
 
 from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
@@ -15,7 +15,7 @@ from .instance import create_instances_in_zone, delete_instances, describe_insta
 
 from ..provider_interface import IEcsClient
 from ..create_instances.instance_config import InstanceConfig
-from ..create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
+from ..create_instances.types import CreateInstanceError, ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
 
 from mypy_boto3_ec2.client import EC2Client
 
@@ -68,11 +68,11 @@ class AwsClient(IEcsClient):
         region_info: RegionInfo,
         zone_info: ZoneInfo,
         instance_type: InstanceType,
-        amount: int,
-        allow_partial_success: bool = False,
-    ) -> list[str]:
+        max_amount: int,
+        min_amount: int,
+    ) -> Tuple[list[str], CreateInstanceError]:
         client = self.build(region_info.id)
-        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, amount, allow_partial_success)
+        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
     
     def delete_instances(self, region_id: str, instances_ids: List[str]):
         client = self.build(region_id)

@@ -1,0 +1,19 @@
+[workspace]
+members = ["python-wrapper", "tree-graph-parse-rust"]
+resolver = "2"
+
+
+[workspace.dependencies]
+tree-graph-parse-rust = { path = "./tree-graph-parse-rust"}
+
+regex = "1.11"
+glob = "0.3"
+ethereum-types = "0.15"
+anyhow = "^1"
+chrono = "0.4"
+rayon = "^1"
+statrs = "0.18"
+cached = "0.55"
+itertools = "0.14"
+hex = "0.4"
+walkdir = "*"

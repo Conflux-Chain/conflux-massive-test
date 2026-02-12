@@ -20,12 +20,13 @@ class InstanceVerifier:
     region_id: str
     target_nodes: int
     request_nodes: int
-    ready_instances: List[Tuple[Instance, str]]
+    ready_instances: List[Tuple[Instance, str, str]]
     pending_instances: Dict[str, Instance]
 
     _event: threading.Event
+    _stop: threading.Event
     _lock: threading.RLock
-    _running_queue: Queue[Dict[str, str]]
+    _running_queue: Queue[Dict[str, Tuple[str, str]]]
 
     def __init__(self, region_id: str, target_nodes: int, additional_nodes: int = 0):
         self.region_id = region_id
@@ -33,18 +34,26 @@ class InstanceVerifier:
         self.request_nodes = target_nodes + additional_nodes
         self.ready_instances = []
         self.pending_instances = dict()
+        
+        self._stop = threading.Event()
         self._event = threading.Event()
         self._lock = threading.RLock()
         self._running_queue = Queue(maxsize=10000)
+        
+    def stop(self):
+        self._stop.set()
+        
+    def is_running(self):
+        return not self._stop.is_set()
 
-    def submit_pending_instances(self, ids: List[str], type: InstanceType):
+    def submit_pending_instances(self, ids: List[str], type: InstanceType, zone_id: str):
         self.pending_instances.update(
-            {id: Instance(instance_id=id, type=type) for id in ids})
+            {id: Instance(instance_id=id, type=type, zone_id=zone_id) for id in ids})
 
     @property
     def ready_nodes(self):
         with self._lock:
-            return sum([instance.type.nodes for instance, _ in self.ready_instances])
+            return sum([instance.type.nodes for instance, _, _ in self.ready_instances])
 
     def copy_ready_instances(self):
         with self._lock:
@@ -78,7 +87,7 @@ class InstanceVerifier:
     def describe_instances_loop(self, client: IEcsClient, check_interval: float = 3.0):
         processed_instances: Set[str] = set()
 
-        while True:
+        while self.is_running():
             # 获取当前 pending instance
             with self._lock:
                 to_check_instances = set(
@@ -111,27 +120,28 @@ class InstanceVerifier:
 
                 if self.ready_nodes >= self.target_nodes:
                     logger.info(
-                        f"Region {self.region_id} reach target nodes, thread describe_instances loop quit")
+                        f"Region {self.region_id} reach target nodes, thread describe_instances loop exit")
                     return
 
             time.sleep(check_interval)
+        logger.info(f"Region {self.region_id} not reach target nodes, thread describe_instances is stopped manually.")
 
     def wait_for_ssh_loop(self):
         future_set = dict()
-        while True:
+        while self.is_running():
             # 从队列获取任务并提交
             try:
                 running_instances = self._running_queue.get_nowait()
-                for instance_id, ip in running_instances.items():
+                for instance_id, (public_ip, private_ip) in running_instances.items():
                     check_future = SSH_CHECK_POOL.submit(
-                        _wait_for_ssh_port_ready, ip)
-                    future_set[instance_id] = (ip, check_future)
+                        _wait_for_ssh_port_ready, public_ip)
+                    future_set[instance_id] = (public_ip, private_ip, check_future)
             except queue.Empty:
                 pass
 
             # 查看线程池结果
             to_clear_instance_ids = set()
-            for instance_id, (ip, future) in future_set.items():
+            for instance_id, (public_ip, private_ip, future) in future_set.items():
                 if not future.done():
                     continue
 
@@ -140,15 +150,15 @@ class InstanceVerifier:
 
                 if is_success:
                     logger.info(
-                        f"Region {self.region_id} Instance {instance_id} IP {ip} connect success")
+                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect success")
 
                     with self._lock:
                         instance = self.pending_instances[instance_id]
                         del self.pending_instances[instance_id]
-                        self.ready_instances.append((instance, ip))
+                        self.ready_instances.append((instance, public_ip, private_ip))
                 else:
                     logger.info(
-                        f"Region {self.region_id} Instance {instance_id} IP {ip} connect fail (timeout)")
+                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect fail (timeout)")
                     with self._lock:
                         del self.pending_instances[instance_id]
 
@@ -161,10 +171,11 @@ class InstanceVerifier:
             with self._lock:
                 if self.ready_nodes >= self.target_nodes:
                     logger.info(
-                        f"Region {self.region_id} reach target nodes, thread wait_for_ssh_loop quit")
+                        f"Region {self.region_id} reach target nodes, thread wait_for_ssh_loop exit")
                     return
 
             time.sleep(1)
+        logger.info(f"Region {self.region_id} not reach target nodes, thread wait_for_ssh_loop is stopped manually.")
 
 def _check_port(ip: str, timeout: int = 5):
     """

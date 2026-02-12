@@ -86,9 +86,9 @@ def _execute_instance(host_spec: HostSpec, ctx: InstanceExecutionContext) -> Lis
         ip_address = host_spec.ip
         user = host_spec.ssh_user
 
-        shell_cmds.scp("./setup_image.sh", ip_address, user, "~/setup_image.sh")
+        shell_cmds.scp("./scripts/setup_image.sh", ip_address, user, "~/setup_image.sh")
         logger.debug(f"实例 {ip_address} 上传初始化脚本完成")
-        shell_cmds.ssh(ip_address, user, "./setup_image.sh")
+        shell_cmds.ssh(ip_address, user, "~/setup_image.sh")
         logger.debug(f"实例 {ip_address} 初始化完成")
         shell_cmds.scp(ctx.config_file.path, ip_address, user, "~/config.toml")
 

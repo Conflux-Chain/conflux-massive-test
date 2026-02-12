@@ -1,5 +1,6 @@
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import threading
 from typing import List, Tuple
 
 from loguru import logger
@@ -91,7 +92,7 @@ def _stop_node_and_collect_log(node: RemoteNode, *, counter1: AtomicCounter, cou
         logger.warning(f"节点 {node.id} 日志生成遇到问题: {e}")
         return 1
     
-def collect_logs(nodes: List[RemoteNode], local_path: str = "./logs", *, max_workers: int = 400):
+def collect_logs(nodes: List[RemoteNode], local_path: str = "./logs", *, max_workers: int = 100):
     counter1 = AtomicCounter()
     counter2 = AtomicCounter()
     total_cnt = len(nodes)

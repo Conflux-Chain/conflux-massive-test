@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from alibabacloud_tea_openapi.models import Config as AliyunConfig
 
@@ -15,7 +15,7 @@ from .instance import create_instances_in_zone, delete_instances, describe_insta
 from ..provider_interface import IEcsClient
 from ..create_instances.instance_config import InstanceConfig
 from ..cleanup_instances.types import InstanceInfoWithTag
-from ..create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
+from ..create_instances.types import CreateInstanceError, ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
 
 
 @dataclass
@@ -78,11 +78,11 @@ class AliyunClient(IEcsClient):
         region_info: RegionInfo,
         zone_info: ZoneInfo,
         instance_type: InstanceType,
-        amount: int,
-        allow_partial_success: bool = False,
-    ) -> list[str]:
+        max_amount: int,
+        min_amount: int,
+    ) -> Tuple[list[str], CreateInstanceError]:
         client = self.build(region_info.id)
-        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, amount, allow_partial_success)
+        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
     
     def delete_instances(self, region_id: str, instances_ids: List[str]):
         client = self.build(region_id)
