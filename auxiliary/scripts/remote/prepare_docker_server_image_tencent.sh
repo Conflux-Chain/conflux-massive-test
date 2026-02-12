@@ -33,5 +33,5 @@ docker pull localhost:5000/conflux-node:base
 # Sanity: can pull other images
 # docker pull busybox:latest
 
-echo "LABEL=cloudimg-rootfs / ext4 defaults,noatime,nodiratime,barrier=0 0 0" > /tmp/fstab
-cp /tmp/fstab /etc/fstab
+# echo "LABEL=cloudimg-rootfs / ext4 defaults,noatime,nodiratime,barrier=0 0 0" > /tmp/fstab
+# cp /tmp/fstab /etc/fstab

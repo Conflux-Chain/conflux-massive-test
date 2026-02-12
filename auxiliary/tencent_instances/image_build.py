@@ -27,7 +27,8 @@ LOCAL_CONFLUX_TAG = "conflux-node:base"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUEST_CONFIG_PATH = REPO_ROOT / "request_config.toml"
-PREPARE_SCRIPT = REPO_ROOT / "auxiliary" / "scripts" / "remote" / "prepare_docker_server_image.sh"
+# Use provider-specific prepare script for Tencent CVM
+PREPARE_SCRIPT = REPO_ROOT / "auxiliary" / "scripts" / "remote" / "prepare_docker_server_image_tencent.sh"
 
 
 class CvmRuntimeConfig:
