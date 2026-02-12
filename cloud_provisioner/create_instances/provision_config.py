@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 import tomllib
 
@@ -22,12 +22,20 @@ class CloudConfig(BaseModel):
     user_tag: str
     image_name: str
     ssh_key_path: str
+    # 专用于腾讯云，因为对 key_pair 有长度限制，其他云不生效
+    key_pair_tag: Optional[str] = None
     regions: List[ProvisionRegionConfig] = []
     instance_types: List[CandidateInstanceType] = []
     
     @property
     def total_nodes(self):
         return sum([region.count for region in self.regions])
+    
+    def get_key_pair_tag(self) -> str:
+        if self.key_pair_tag:
+            return self.key_pair_tag
+        else:
+            return self.user_tag
 
 class ProvisionConfig(BaseModel):
     aliyun: CloudConfig
