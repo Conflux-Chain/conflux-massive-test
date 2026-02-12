@@ -16,6 +16,7 @@ class HostSpec:
     region: str
     zone: str
     instance_id: str
+    private_ip: str
 
     
 def save_hosts(hosts: List[HostSpec], file_path: str):

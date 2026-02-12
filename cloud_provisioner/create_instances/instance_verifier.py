@@ -20,13 +20,13 @@ class InstanceVerifier:
     region_id: str
     target_nodes: int
     request_nodes: int
-    ready_instances: List[Tuple[Instance, str]]
+    ready_instances: List[Tuple[Instance, str, str]]
     pending_instances: Dict[str, Instance]
 
     _event: threading.Event
     _stop: threading.Event
     _lock: threading.RLock
-    _running_queue: Queue[Dict[str, str]]
+    _running_queue: Queue[Dict[str, Tuple[str, str]]]
 
     def __init__(self, region_id: str, target_nodes: int, additional_nodes: int = 0):
         self.region_id = region_id
@@ -53,7 +53,7 @@ class InstanceVerifier:
     @property
     def ready_nodes(self):
         with self._lock:
-            return sum([instance.type.nodes for instance, _ in self.ready_instances])
+            return sum([instance.type.nodes for instance, _, _ in self.ready_instances])
 
     def copy_ready_instances(self):
         with self._lock:
@@ -132,16 +132,16 @@ class InstanceVerifier:
             # 从队列获取任务并提交
             try:
                 running_instances = self._running_queue.get_nowait()
-                for instance_id, ip in running_instances.items():
+                for instance_id, (public_ip, private_ip) in running_instances.items():
                     check_future = SSH_CHECK_POOL.submit(
-                        _wait_for_ssh_port_ready, ip)
-                    future_set[instance_id] = (ip, check_future)
+                        _wait_for_ssh_port_ready, public_ip)
+                    future_set[instance_id] = (public_ip, private_ip, check_future)
             except queue.Empty:
                 pass
 
             # 查看线程池结果
             to_clear_instance_ids = set()
-            for instance_id, (ip, future) in future_set.items():
+            for instance_id, (public_ip, private_ip, future) in future_set.items():
                 if not future.done():
                     continue
 
@@ -150,15 +150,15 @@ class InstanceVerifier:
 
                 if is_success:
                     logger.info(
-                        f"Region {self.region_id} Instance {instance_id} IP {ip} connect success")
+                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect success")
 
                     with self._lock:
                         instance = self.pending_instances[instance_id]
                         del self.pending_instances[instance_id]
-                        self.ready_instances.append((instance, ip))
+                        self.ready_instances.append((instance, public_ip, private_ip))
                 else:
                     logger.info(
-                        f"Region {self.region_id} Instance {instance_id} IP {ip} connect fail (timeout)")
+                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect fail (timeout)")
                     with self._lock:
                         del self.pending_instances[instance_id]
 
