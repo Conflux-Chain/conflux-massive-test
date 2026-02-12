@@ -1,287 +1,65 @@
-"""Server image building utilities for Aliyun ECS."""
+"""Build a reusable Aliyun ECS image which acts as a private Docker registry.
+
+Requirements implemented:
+- Fixed region: ap-southeast-3
+- Fixed spot builder type: ecs.xn4.small
+- 20GB disk
+- Docker installed + local registry on :5000
+- Preload lylcx2007/conflux-node:latest as conflux-node:base into the registry
+- Verification-first: boot 2 ecs.g8i.large in same region+zone, pull from registry
+- Tag instances so cloud_provisioner/cleanup_instances can delete them
+
+This file intentionally avoids auxiliary/ali_instances config classes and reuses cloud_provisioner.
+"""
+
+# Allow running this file directly via `python auxiliary/ali_instances/image_build.py`
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
 import asyncio
 import shlex
+import threading
 import time
+import tomllib
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Optional, Sequence, Tuple
+from typing import Optional
 
 import asyncssh
 from alibabacloud_ecs20140526 import models as ecs_models
-from alibabacloud_ecs20140526.client import Client as EcsClient
 from loguru import logger
+from dotenv import load_dotenv
 
 from utils.wait_until import wait_until
-from .config import AliCredentials, EcsRuntimeConfig, InstanceTypeConfig, client
-from .instance_prep import (
-    allocate_public_ip,
-    create_instance,
-    delete_instance,
-    ensure_keypair,
-    ensure_net,
-    start_instance,
-    stop_instance,
-    wait_ssh,
-    wait_running,
-    wait_status,
-)
+from cloud_provisioner.aliyun_provider.client_factory import AliyunClient
+from cloud_provisioner.create_instances.instance_config import InstanceConfig
+from cloud_provisioner.create_instances.instance_verifier import InstanceVerifier
+from cloud_provisioner.create_instances.network_infra import allocate_vacant_cidr_block
+from cloud_provisioner.create_instances.types import InstanceType, RegionInfo, ZoneInfo, KeyPairRequestConfig
 
 
-# --- Image ---
-DEFAULT_IMAGE_NAME = "conflux-docker-base"
+# --- Fixed settings ---
+DEFAULT_IMAGE_NAME = "conflux-docker-registry"
+FIXED_REGION = "ap-southeast-3"
+BUILDER_INSTANCE_TYPE = "ecs.xn4.small"
+TEST_INSTANCE_TYPE = "ecs.g8i.large"
+TEST_INSTANCES = 2
+DISK_GB = 20
+REGISTRY_PORT = 5000
+LOCAL_CONFLUX_TAG = "conflux-node:base"
 
-# Instance type selection defaults for image-building flow
-DEFAULT_MIN_CPU_CORES = 4
-DEFAULT_MIN_MEMORY_GB = 8.0
-DEFAULT_MAX_MEMORY_GB = 8.0
-
-
-def pick_instance_type_for_building_image(c: EcsClient, cfg: EcsRuntimeConfig) -> Optional[tuple[str, str]]:
-    spot = cfg.spot_strategy if cfg.use_spot else None
-    req = ecs_models.DescribeAvailableResourceRequest(
-        region_id=cfg.region_id,
-        destination_resource="InstanceType",
-        resource_type="instance",
-        instance_charge_type="PostPaid",
-        spot_strategy=spot,
-        cores=DEFAULT_MIN_CPU_CORES,
-        memory=DEFAULT_MIN_MEMORY_GB,
-    )
-    resp = c.describe_available_resource(req)
-    for z in resp.body.available_zones.available_zone or []:
-        if z.status_category not in {"WithStock", "ClosedWithStock"}:
-            continue
-        types = [
-            i.value
-            for r in (z.available_resources.available_resource or [])
-            if r.type == "InstanceType"
-            for i in (r.supported_resources.supported_resource or [])
-            if i.status_category in {"WithStock", "ClosedWithStock"}
-        ]
-        if not types:
-            continue
-        tresp = c.describe_instance_types(ecs_models.DescribeInstanceTypesRequest(instance_types=types))
-        tmap = {t.instance_type_id: t for t in (tresp.body.instance_types.instance_type or []) if t.instance_type_id}
-        cands = [
-            t
-            for t in tmap.values()
-            if t.cpu_core_count == DEFAULT_MIN_CPU_CORES
-            and t.memory_size
-            and DEFAULT_MIN_MEMORY_GB <= t.memory_size <= DEFAULT_MAX_MEMORY_GB
-        ]
-        if cands:
-            cands.sort(key=lambda t: (t.memory_size, t.instance_type_id))
-            s = cands[0]
-            return z.zone_id, s.instance_type_id
-    return None
+# Aliyun-only launch preferences for image builder flow.
+ALIYUN_SYSTEM_DISK_CATEGORY = "cloud_essd"
+ALIYUN_SPOT_STRATEGY = "SpotAsPriceGo"
 
 
-def _build_conflux_script_source() -> Path:
-    return Path(__file__).resolve().parent.parent / "auxiliary" / "scripts" / "remote" / "build_conflux_binary.sh"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REQUEST_CONFIG_PATH = REPO_ROOT / "request_config.toml"
+PREPARE_SCRIPT = REPO_ROOT / "auxiliary" / "scripts" / "remote" / "prepare_docker_server_image.sh"
 
-def _img_name() -> str:
-    return DEFAULT_IMAGE_NAME
-
-
-def find_img_info(c: EcsClient, r: str, name: str) -> Optional[tuple[str, str]]:
-    resp = c.describe_images(ecs_models.DescribeImagesRequest(region_id=r, image_name=name, image_owner_alias="self"))
-    for i in resp.body.images.image or []:
-        if i.image_name == name and i.image_id:
-            return i.image_id, i.status or ""
-    return None
-
-
-def find_img(c: EcsClient, r: str, name: str) -> Optional[str]:
-    info = find_img_info(c, r, name)
-    return info[0] if info else None
-
-
-def find_img_in_regions(
-    creds: AliCredentials,
-    regions: Sequence[str],
-    name: str,
-) -> Optional[Tuple[str, str]]:
-    for region in regions:
-        c = client(creds, region)
-        img = find_img(c, region, name)
-        if img:
-            return region, img
-    return None
-
-
-async def ensure_image_in_region(
-    *,
-    creds: AliCredentials,
-    region: str,
-    image_name: str,
-    search_regions: Sequence[str],
-    poll_interval: int,
-    wait_timeout: int,
-) -> str:
-    c = client(creds, region)
-    existing = find_img_info(c, region, image_name)
-    if existing:
-        image_id, status = existing
-        if status != "Available":
-            await wait_images_available({(region, image_id): c}, poll_interval, wait_timeout)
-        return image_id
-
-    lookup_regions = [r for r in search_regions if r]
-    if region not in lookup_regions:
-        lookup_regions.append(region)
-
-    found = find_img_in_regions(creds, lookup_regions, image_name)
-    if not found:
-        raise RuntimeError(f"image {image_name} not found in any region")
-    src_region, src_image_id = found
-    if src_region == region:
-        return src_image_id
-
-    logger.info(f"copying image {image_name} from {src_region} to {region}")
-    image_id = _copy_image(
-        creds=creds,
-        src_region=src_region,
-        dest_region=region,
-        image_id=src_image_id,
-        image_name=image_name,
-        poll_interval=poll_interval,
-        wait_timeout=wait_timeout,
-    )
-    wait_img(c, region, image_id, poll_interval, wait_timeout)
-    return image_id
-
-
-def build_base_image_in_region(
-    *,
-    creds: AliCredentials,
-    region: str,
-    image_name: str,
-    poll_interval: int,
-    wait_timeout: int,
-) -> str:
-    cfg = EcsRuntimeConfig(credentials=creds, region_id=region)
-    cfg.poll_interval = poll_interval
-    cfg.wait_timeout = wait_timeout
-    base_image_id = find_ubuntu(client(creds, region), region)
-    logger.info(f"building base image {image_name} in {region}")
-    return create_server_image(cfg, base_image_id=base_image_id, prepare_fn=prepare_docker_server_image)
-
-
-def _copy_image(
-    *,
-    creds: AliCredentials,
-    src_region: str,
-    dest_region: str,
-    image_id: str,
-    image_name: str,
-    poll_interval: int,
-    wait_timeout: int,
-) -> str:
-    src_client = client(creds, src_region)
-    try:
-        resp = src_client.copy_image(
-            ecs_models.CopyImageRequest(
-                region_id=src_region,
-                destination_region_id=dest_region,
-                image_id=image_id,
-                destination_image_name=image_name,
-            )
-        )
-    except Exception as exc:
-        if "InvalidImageName.Duplicated" in str(exc):
-            # Image with the same name already exists in the destination region
-            # but is not available because it is still being copied.
-            # query the image ID by name.
-            dest_client = client(creds, dest_region)
-            existing = find_img_info(dest_client, dest_region, image_name)
-            if existing:
-                logger.info(f"found existing image {existing[0]} of name {image_name} in {dest_region} of state {existing[1]}. Probably being copied. Will wait for it to be available.")
-                return existing[0]
-        raise
-    copied_id = resp.body.image_id if resp.body else None
-    if not copied_id:
-        raise RuntimeError(f"failed to copy image {image_name} to {dest_region}")
-    return copied_id
-
-
-async def wait_images_available(
-    pending: dict[tuple[str, str], EcsClient],
-    poll_interval: int,
-    wait_timeout: int,
-) -> None:
-    start = asyncio.get_event_loop().time()
-    while pending:
-        if asyncio.get_event_loop().time() - start > wait_timeout:
-            raise RuntimeError("timeout waiting for image copies")
-        done: list[tuple[str, str]] = []
-        for (region, image_id), c in pending.items():
-            resp = c.describe_images(ecs_models.DescribeImagesRequest(region_id=region, image_id=image_id))
-            imgs = resp.body.images.image if resp.body and resp.body.images else []
-            if not imgs:
-                continue
-            st = imgs[0].status
-            logger.info(f"image {image_id} in {region}: {st}")
-            if st in {"CreateFailed", "Deprecated"}:
-                raise RuntimeError(f"image failed: {st}")
-            if st == "Available":
-                done.append((region, image_id))
-        for key in done:
-            pending.pop(key, None)
-        if pending:
-            await asyncio.sleep(poll_interval)
-
-
-def ensure_images_in_regions(
-    *,
-    creds: AliCredentials,
-    target_regions: Sequence[str],
-    image_name: str,
-    search_regions: Optional[Sequence[str]] = None,
-    poll_interval: int,
-    wait_timeout: int,
-) -> dict[str, str]:
-    region_list = [r for r in target_regions if r]
-    if not region_list:
-        return {}
-    lookup_regions = [r for r in (search_regions or region_list) if r]
-    image_map: dict[str, str] = {}
-
-    found = find_img_in_regions(creds, lookup_regions, image_name)
-    if not found:
-        build_region = region_list[0]
-        built_id = build_base_image_in_region(
-            creds=creds,
-            region=build_region,
-            image_name=image_name,
-            poll_interval=poll_interval,
-            wait_timeout=wait_timeout,
-        )
-        image_map[build_region] = built_id
-        if build_region not in lookup_regions:
-            lookup_regions.append(build_region)
-    else:
-        src_region, src_image_id = found
-        image_map[src_region] = src_image_id
-
-    async def _ensure_all() -> dict[str, str]:
-        tasks = [
-            ensure_image_in_region(
-                creds=creds,
-                region=region,
-                image_name=image_name,
-                search_regions=lookup_regions,
-                poll_interval=poll_interval,
-                wait_timeout=wait_timeout,
-            )
-            for region in region_list
-        ]
-        results = await asyncio.gather(*tasks)
-        return {region: image_id for region, image_id in zip(region_list, results)}
-
-    image_map.update(asyncio.run(_ensure_all()))
-    return image_map
-
-
-def find_ubuntu(c: EcsClient, r: str, max_pages: int = 5, page_size: int = 50) -> str:
+def find_ubuntu(c, r: str, max_pages: int = 5, page_size: int = 50) -> str:
     candidates: list[ecs_models.DescribeImagesResponseBodyImagesImage] = []
     page_number = 1
     while page_number <= max_pages:
@@ -300,6 +78,8 @@ def find_ubuntu(c: EcsClient, r: str, max_pages: int = 5, page_size: int = 50) -
         for img in images:
             name = (img.image_name or "").lower()
             if "ubuntu" not in name:
+                continue
+            if any(k in name for k in ("gpu", "cuda", "driver")):
                 continue
             if "arm" in name or "aarch64" in name:
                 continue
@@ -331,7 +111,7 @@ def find_ubuntu(c: EcsClient, r: str, max_pages: int = 5, page_size: int = 50) -
     return chosen.image_id
 
 
-def wait_img(c: EcsClient, r: str, img: str, poll: int, timeout: int) -> None:
+def wait_img(c, r: str, img: str, poll: int, timeout: int) -> None:
     def chk() -> bool:
         resp = c.describe_images(ecs_models.DescribeImagesRequest(region_id=r, image_id=img))
         imgs = resp.body.images.image if resp.body and resp.body.images else []
@@ -346,92 +126,288 @@ def wait_img(c: EcsClient, r: str, img: str, poll: int, timeout: int) -> None:
     wait_until(chk, timeout=timeout, retry_interval=poll)
 
 
-async def prepare_docker_server_image(host: str, cfg: EcsRuntimeConfig) -> None:
-    await wait_ssh(host, cfg.ssh_username, cfg.ssh_private_key_path, cfg.wait_timeout)
-    key_path = str(Path(cfg.ssh_private_key_path).expanduser())
-    async with asyncssh.connect(host, username=cfg.ssh_username, client_keys=[key_path], known_hosts=None) as conn:
-        async def run(cmd: str, check: bool = True) -> None:
-            logger.info(f"remote: {cmd}")
-            r = await conn.run(cmd, check=False)
-            if r.stdout:
-                logger.info(r.stdout.strip())
-            if r.stderr:
-                logger.warning(r.stderr.strip())
-            if check and r.exit_status != 0:
-                raise RuntimeError(f"failed: {cmd}")
-
-        prepare_script = Path(__file__).resolve().parent.parent / "auxiliary" / "scripts" / "remote" / "prepare_docker_server_image.sh"
-        if not prepare_script.exists():
-            raise FileNotFoundError(f"prepare script not found: {prepare_script}")
-        remote_prepare = f"/tmp/{prepare_script.name}.{int(time.time())}.sh"
-        await asyncssh.scp(str(prepare_script), (conn, remote_prepare))
-        await run(f"sudo bash {shlex.quote(remote_prepare)}")
-        await run(f"sudo rm -f {shlex.quote(remote_prepare)}")
+async def _remote_run(conn: asyncssh.SSHClientConnection, cmd: str, *, check: bool = True) -> None:
+    logger.info(f"remote: {cmd}")
+    r = await conn.run(cmd, check=False)
+    if r.stdout:
+        logger.info(r.stdout.strip())
+    if r.stderr:
+        logger.warning(r.stderr.strip())
+    if check and r.exit_status != 0:
+        raise RuntimeError(f"failed: {cmd}")
 
 
-def create_server_image(
-    cfg: EcsRuntimeConfig,
-    *,
-    base_image_id: str,
-    dry_run: bool = False,
-    prepare_fn: Callable[[str, EcsRuntimeConfig], Coroutine[Any, Any, None]] = prepare_docker_server_image,
-) -> str:
-    name = _img_name()
-    c = client(cfg.credentials, cfg.region_id)
-    existing = find_img(c, cfg.region_id, name)
-    if existing:
-        logger.info(f"image exists: {existing}")
-        if not dry_run:
-            wait_img(c, cfg.region_id, existing, cfg.poll_interval, cfg.wait_timeout)
-        return f"dry-run:{existing}" if dry_run else existing
-    if dry_run:
-        return f"dry-run:{name}"
-    sel = pick_instance_type_for_building_image(c, cfg)
-    if not sel and cfg.use_spot:
-        cfg.use_spot = False
-        sel = pick_instance_type_for_building_image(c, cfg)
-    if not sel:
-        raise RuntimeError("no instance type")
-    cfg.zone_id, selected_type = sel
-    cfg.instance_type = [InstanceTypeConfig(name=selected_type)]
-    ensure_net(c, cfg)
-    ensure_keypair(c, cfg.region_id, cfg.key_pair_name, cfg.ssh_private_key_path)
-    iid = ""
+async def _connect_with_retry(host: str, *, ssh_user: str, ssh_key_path: str, timeout: int = 300) -> asyncssh.SSHClientConnection:
+    """Establish an SSH connection with retries to handle transient boot-time disconnects."""
+    deadline = time.time() + timeout
+    key_path = str(Path(ssh_key_path).expanduser())
+    last_exc: Optional[BaseException] = None
+    while time.time() < deadline:
+        try:
+            conn = await asyncssh.connect(host, username=ssh_user, client_keys=[key_path], known_hosts=None)
+            # small round-trip to confirm session is stable
+            r = await conn.run("true", check=False)
+            if r.exit_status == 0:
+                return conn
+            await conn.wait_closed()
+        except BaseException as exc:
+            last_exc = exc
+        await asyncio.sleep(3)
+    raise RuntimeError(f"SSH not stable for {host} within timeout; last error: {last_exc}")
+
+
+def _load_request_config() -> tuple[str, str, str]:
+    with open(REQUEST_CONFIG_PATH, "rb") as f:
+        data = tomllib.load(f)
+    aliyun = data.get("aliyun") or {}
+    user_tag = (aliyun.get("user_tag") or "").strip()
+    ssh_key_path = (aliyun.get("ssh_key_path") or "").strip()
+    ssh_user = (aliyun.get("default_user_name") or "root").strip() or "root"
+    if not user_tag:
+        raise RuntimeError("Missing [aliyun].user_tag in request_config.toml")
+    if not ssh_key_path:
+        raise RuntimeError("Missing [aliyun].ssh_key_path in request_config.toml")
+    return user_tag, ssh_key_path, ssh_user
+
+
+def _infra_tag(user_tag: str) -> str:
+    return f"conflux-massive-test-{user_tag}"
+
+
+def _ensure_shared_infra(ali: AliyunClient, *, region_id: str, user_tag: str, ssh_key_path: str) -> tuple[str, str, str, list[str]]:
+    tag = _infra_tag(user_tag)
+
+    zone_ids = ali.get_zone_ids_in_region(region_id)
+    if not zone_ids:
+        raise RuntimeError(f"no zones in region {region_id}")
+
+    vpc = next((v for v in ali.get_vpcs_in_region(region_id) if v.vpc_name == tag), None)
+    vpc_id = vpc.vpc_id if vpc else ali.create_vpc(region_id, tag, "10.0.0.0/16")
+
+    sg = next((s for s in ali.get_security_groups_in_region(region_id, vpc_id) if s.security_group_name == tag), None)
+    security_group_id = sg.security_group_id if sg else ali.create_security_group(region_id, vpc_id, tag)
+
+    fp = KeyPairRequestConfig(key_path=ssh_key_path, key_pair_name=tag).finger_print("aliyun")
+    fp_compact = "".join(ch for ch in fp.lower() if ch.isalnum())
+    key_name_base = f"{tag}-{fp_compact[-8:]}" if fp_compact else tag
+    key_pair = KeyPairRequestConfig(key_path=ssh_key_path, key_pair_name=key_name_base)
+
+    remote_kp = ali.get_keypairs_in_region(region_id, key_pair.key_pair_name)
+    if remote_kp is None:
+        ali.create_keypair(region_id, key_pair)
+    elif remote_kp.finger_print != key_pair.finger_print("aliyun"):
+        key_pair = KeyPairRequestConfig(key_path=ssh_key_path, key_pair_name=f"{key_name_base}-{int(time.time())}")
+        ali.create_keypair(region_id, key_pair)
+
+    return vpc_id, security_group_id, key_pair.key_pair_name, zone_ids
+
+
+def _ensure_vswitch_in_zone(ali: AliyunClient, *, region_id: str, vpc_id: str, user_tag: str, zone_id: str) -> str:
+    tag = _infra_tag(user_tag)
+    v_switches = ali.get_v_switchs_in_region(region_id, vpc_id)
+    vs = next((vs for vs in v_switches if vs.v_switch_name == tag and vs.zone_id == zone_id), None)
+    if vs is not None:
+        return vs.v_switch_id
+    occupied = [x.cidr_block for x in v_switches]
+    cidr = allocate_vacant_cidr_block(occupied, prefix=20, vpc_cidr="10.0.0.0/16")
+    return ali.create_v_switch(region_id, zone_id, vpc_id, tag, cidr)
+
+
+def _wait_for_instances(ali: AliyunClient, *, region_id: str, zone_id: str, instance_type: InstanceType, instance_ids: list[str], wait_timeout: int) -> list[str]:
+    verifier = InstanceVerifier(region_id, target_nodes=len(instance_ids))
+    verifier.submit_pending_instances(instance_ids, instance_type, zone_id)
+    t1 = threading.Thread(target=verifier.describe_instances_loop, args=(ali,))
+    t2 = threading.Thread(target=verifier.wait_for_ssh_loop)
+    t1.start()
+    t2.start()
     try:
-        cfg.image_id = base_image_id
-        iid = create_instance(c, cfg, disk_size=20)[0]
-        logger.info(f"builder: {iid}")
-        st = wait_status(c, cfg.region_id, iid, ["Stopped", "Running"], cfg.poll_interval, cfg.wait_timeout)
-        if st == "Stopped":
-            try:
-                start_instance(c, iid)
-            except Exception as exc:
-                logger.warning(f"start_instance failed for {iid}: {exc}. Will wait for instance to become Running.")
-        wait_status(c, cfg.region_id, iid, ["Running"], cfg.poll_interval, cfg.wait_timeout)
-        allocate_public_ip(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-        ip = wait_running(c, cfg.region_id, iid, cfg.poll_interval, cfg.wait_timeout)
-        logger.info(f"builder ready: {ip}")
-        asyncio.run(prepare_fn(ip, cfg))
-        logger.info("stopping builder instance")
-        stop_instance(c, iid, "StopCharging")
-        wait_status(c, cfg.region_id, iid, ["Stopped"], cfg.poll_interval, cfg.wait_timeout)
-        cr = c.create_image(ecs_models.CreateImageRequest(region_id=cfg.region_id, instance_id=iid, image_name=name))
-        if not cr.body or not cr.body.image_id:
-            stop_instance(c, iid, None)
-            wait_status(c, cfg.region_id, iid, ["Stopped"], cfg.poll_interval, cfg.wait_timeout)
-            cr = c.create_image(ecs_models.CreateImageRequest(region_id=cfg.region_id, instance_id=iid, image_name=name))
-        img = cr.body.image_id
-        if not img:
-            raise RuntimeError("image_id missing from create_image response")
-        logger.info(f"server image building started: {img}")
-        wait_img(c, cfg.region_id, img, cfg.poll_interval, cfg.wait_timeout)
-        return img
+        wait_until(lambda: verifier.ready_nodes >= len(instance_ids), timeout=wait_timeout, retry_interval=3)
+        ready = verifier.copy_ready_instances()
+        return [ip for _, ip in ready]
     finally:
-        if iid:
-            try:
-                delete_instance(c, cfg.region_id, iid)
-                logger.info(f"builder deleted: {iid}")
-            except Exception as e:
-                logger.warning(f"delete failed: {e}")
+        verifier.stop()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
 
 
+async def _prepare_registry_builder(host: str, *, ssh_user: str, ssh_key_path: str) -> None:
+    if not PREPARE_SCRIPT.exists():
+        raise FileNotFoundError(f"prepare script not found: {PREPARE_SCRIPT}")
+    conn = await _connect_with_retry(host, ssh_user=ssh_user, ssh_key_path=ssh_key_path, timeout=300)
+    async with conn:
+        remote_prepare = f"/tmp/{PREPARE_SCRIPT.name}.{int(time.time())}.sh"
+        await asyncssh.scp(str(PREPARE_SCRIPT), (conn, remote_prepare))
+        await _remote_run(conn, f"sudo bash {shlex.quote(remote_prepare)}")
+        await _remote_run(conn, f"sudo rm -f {shlex.quote(remote_prepare)}")
+
+
+def _stop_instance(raw_ecs, *, instance_id: str) -> None:
+    raw_ecs.stop_instance(ecs_models.StopInstanceRequest(instance_id=instance_id, force_stop=True, stopped_mode="StopCharging"))
+
+
+def _describe_instance(raw_ecs, *, region_id: str, instance_id: str):
+    import json
+    rep = raw_ecs.describe_instances(ecs_models.DescribeInstancesRequest(region_id=region_id, instance_ids=json.dumps([instance_id])))
+    instances = rep.body.instances.instance if rep.body and rep.body.instances else []
+    return instances[0] if instances else None
+
+
+def _wait_status(raw_ecs, *, region_id: str, instance_id: str, want: set[str], poll: int, timeout: int) -> str:
+    h: dict[str, Optional[str]] = {"s": None}
+
+    def _chk() -> bool:
+        inst = _describe_instance(raw_ecs, region_id=region_id, instance_id=instance_id)
+        h["s"] = inst.status if inst else None
+        return (h["s"] or "") in want
+
+    wait_until(_chk, timeout=timeout, retry_interval=poll)
+    return h["s"] or ""
+
+
+def main() -> None:
+    # Load credentials from .env if present, otherwise rely on process env.
+    load_dotenv()
+    env_path = REPO_ROOT / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+
+    user_tag, ssh_key_path, ssh_user = _load_request_config()
+    region_id = FIXED_REGION
+
+    ali = AliyunClient.load_from_env()
+    raw_ecs = ali.build(region_id)
+
+    # Reuse cloud_provisioner: if an image named DEFAULT_IMAGE_NAME already exists in the target region,
+    # skip the build to avoid duplicate work.
+    try:
+        existing_images = ali.get_images_in_region(region_id, DEFAULT_IMAGE_NAME)
+        if existing_images:
+            img = existing_images[0]
+            logger.info(f"image {DEFAULT_IMAGE_NAME} already exists in {region_id}: {img.image_id} ({img.image_name}). Skipping build.")
+            return
+    except Exception as exc:
+        logger.warning(f"failed to query existing images in {region_id}: {exc}. Will continue with build")
+
+    base_ubuntu = find_ubuntu(raw_ecs, region_id)
+    vpc_id, security_group_id, key_pair_name, zone_ids = _ensure_shared_infra(
+        ali,
+        region_id=region_id,
+        user_tag=user_tag,
+        ssh_key_path=ssh_key_path,
+    )
+
+    cfg = InstanceConfig(
+        user_tag_value=user_tag,
+        instance_name_prefix="conflux-docker-registry",
+        disk_size=DISK_GB,
+        internet_max_bandwidth_out=100,
+        use_spot=True,
+    )
+    logger.info(
+        f"aliyun builder launch settings: system_disk={ALIYUN_SYSTEM_DISK_CATEGORY}, spot_strategy={ALIYUN_SPOT_STRATEGY}"
+    )
+
+    # test_cfg = InstanceConfig(
+    #     user_tag_value=user_tag,
+    #     instance_name_prefix="conflux-registry-test",
+    #     disk_size=DISK_GB,
+    #     internet_max_bandwidth_out=100,
+    #     use_spot=True,
+    # )
+
+    # 1) Builder instance (spot ecs.xn4.small) - try zones sequentially (no instance-type querying)
+    builder_type = InstanceType(BUILDER_INSTANCE_TYPE, 1)
+    builder_id: Optional[str] = None
+    builder_ip: Optional[str] = None
+    chosen_zone: Optional[ZoneInfo] = None
+    region_info: Optional[RegionInfo] = None
+
+    for zone_id in zone_ids:
+        v_switch_id = _ensure_vswitch_in_zone(
+            ali,
+            region_id=region_id,
+            vpc_id=vpc_id,
+            user_tag=user_tag,
+            zone_id=zone_id,
+        )
+        zone_info = ZoneInfo(id=zone_id, v_switch_id=v_switch_id)
+        region_info = RegionInfo(
+            id=region_id,
+            zones={zone_id: zone_info},
+            security_group_id=security_group_id,
+            vpc_id=vpc_id,
+            image_id=base_ubuntu,
+            key_pair_name=key_pair_name,
+            key_path=ssh_key_path,
+        )
+
+        ids, err = ali.create_instances_in_zone(cfg, region_info, zone_info, builder_type, max_amount=1, min_amount=1)
+        if not ids:
+            logger.warning(f"zone {zone_id} cannot create {BUILDER_INSTANCE_TYPE}: {err}")
+            continue
+
+        builder_id = ids[0]
+        chosen_zone = zone_info
+        logger.info(f"builder instance in zone {zone_id}: {builder_id}")
+        try:
+            builder_ip = _wait_for_instances(
+                ali,
+                region_id=region_id,
+                zone_id=zone_id,
+                instance_type=builder_type,
+                instance_ids=[builder_id],
+                wait_timeout=1800,
+            )[0]
+            break
+        except Exception:
+            ali.delete_instances(region_id, [builder_id])
+            builder_id = None
+            builder_ip = None
+            chosen_zone = None
+            continue
+
+    if not builder_id or not builder_ip or not chosen_zone or not region_info:
+        raise RuntimeError(f"failed to create builder instance of type {BUILDER_INSTANCE_TYPE} in any zone of {region_id}")
+
+    try:
+        logger.success(f"builder ready: {builder_ip}")
+
+        asyncio.run(_prepare_registry_builder(builder_ip, ssh_user=ssh_user, ssh_key_path=ssh_key_path))
+
+        # 2) Verification instances (2 spot ecs.g8i.large) pulling from builder registry
+        # test_type = InstanceType(TEST_INSTANCE_TYPE, 1)
+        # test_ids, err = ali.create_instances_in_zone(test_cfg, region_info, chosen_zone, test_type, max_amount=TEST_INSTANCES, min_amount=TEST_INSTANCES)
+        # if len(test_ids) != TEST_INSTANCES:
+        #     raise RuntimeError(f"failed to create {TEST_INSTANCES} test instances: got={len(test_ids)} err={err}")
+        # try:
+        #     test_ips = _wait_for_instances(ali, region_id=region_id, zone_id=chosen_zone.id, instance_type=test_type, instance_ids=test_ids, wait_timeout=1800)
+        #     registry = f"{builder_ip}:{REGISTRY_PORT}"
+        #     for ip in test_ips:
+        #         asyncio.run(_install_docker_and_pull_from_registry(ip, ssh_user, ssh_key_path, registry))
+        #     logger.success("registry pull verified from 2 test instances")
+        # finally:
+        #     ali.delete_instances(region_id, test_ids)
+        #     logger.info("test instances deleted")
+
+        # 3) Stop builder and create image
+        logger.info("stopping builder instance and creating custom image")
+        _stop_instance(raw_ecs, instance_id=builder_id)
+        _wait_status(raw_ecs, region_id=region_id, instance_id=builder_id, want={"Stopped"}, poll=5, timeout=1800)
+
+        cr = raw_ecs.create_image(ecs_models.CreateImageRequest(region_id=region_id, instance_id=builder_id, image_name=DEFAULT_IMAGE_NAME))
+        image_id = cr.body.image_id if cr.body else None
+        if not image_id:
+            raise RuntimeError("create_image did not return image_id")
+        wait_img(raw_ecs, region_id, image_id, poll=10, timeout=3600)
+        logger.success(f"image available: {DEFAULT_IMAGE_NAME} ({image_id})")
+    finally:
+        try:
+            if builder_id:
+                ali.delete_instances(region_id, [builder_id])
+            logger.info("builder instance deleted")
+        except Exception as exc:
+            logger.warning(f"failed to delete builder instance {builder_id}: {exc}")
+
+
+if __name__ == "__main__":
+    main()

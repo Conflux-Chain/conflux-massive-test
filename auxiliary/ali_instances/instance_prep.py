@@ -360,8 +360,6 @@ def _run_instances_once(
     )
     if allow_partial_success:
         req.min_amount = 1
-    if cfg.use_spot:
-        req.spot_strategy = cfg.spot_strategy
     if disk:
         req.system_disk = disk
     try:
