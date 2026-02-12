@@ -47,36 +47,43 @@ def create_instances_in_zone(
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
     
     tags = _instance_tags(cfg) + [{'Key': 'Name', 'Value': name}]
-    
+    instance_market_options = None
+    if cfg.use_spot:
+        instance_market_options = {"MarketType": "spot"}
+
     try:
-        response = client.run_instances(
-            ImageId=region_info.image_id,
-            MinCount=min_amount,
-            MaxCount=max_amount,
-            KeyName=region_info.key_pair_name,
-            InstanceType=instance_type.name, # pyright: ignore[reportArgumentType]
-            NetworkInterfaces=[{
-                'AssociatePublicIpAddress': True,
-                'DeviceIndex': 0,
-                'SubnetId': zone_info.v_switch_id,
-                'Groups': [region_info.security_group_id]
+        params = {
+            "ImageId": region_info.image_id,
+            "MinCount": min_amount,
+            "MaxCount": max_amount,
+            "KeyName": region_info.key_pair_name,
+            "InstanceType": instance_type.name,  # pyright: ignore[reportArgumentType]
+            "NetworkInterfaces": [{
+                "AssociatePublicIpAddress": True,
+                "DeviceIndex": 0,
+                "SubnetId": zone_info.v_switch_id,
+                "Groups": [region_info.security_group_id]
             }],
-            Placement={'AvailabilityZone': zone_info.id},
-            BlockDeviceMappings=[{
-                'DeviceName': '/dev/sda1',
-                'Ebs': {
-                    'VolumeSize': cfg.disk_size,
-                    'VolumeType': 'gp3',
-                    'Iops': 3000,
-                    'Throughput': 300,
-                    'DeleteOnTermination': True
+            "Placement": {"AvailabilityZone": zone_info.id},
+            "BlockDeviceMappings": [{
+                "DeviceName": "/dev/sda1",
+                "Ebs": {
+                    "VolumeSize": cfg.disk_size,
+                    "VolumeType": "gp3",
+                    "Iops": 3000,
+                    "Throughput": 300,
+                    "DeleteOnTermination": True
                 }
             }],
-            TagSpecifications=[{
-                'ResourceType': 'instance',
-                'Tags': tags
-            }] # pyright: ignore[reportArgumentType]
-        )
+            "TagSpecifications": [{
+                "ResourceType": "instance",
+                "Tags": tags
+            }]  # pyright: ignore[reportArgumentType]
+        }
+        if instance_market_options is not None:
+            params["InstanceMarketOptions"] = instance_market_options
+
+        response = client.run_instances(**params)
         ids = [instance['InstanceId'] for instance in response['Instances']]
         assert ids is not None
         logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={min_amount}~{max_amount}")
