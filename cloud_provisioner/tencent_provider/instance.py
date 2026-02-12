@@ -140,10 +140,12 @@ def describe_instance_status(client: CvmClient, instance_ids: List[str]) -> Inst
             state = ins.InstanceState
             if state == "RUNNING":
                 public_ip = None
+                private_ip = None
                 if ins.PublicIpAddresses:
                     public_ip = ins.PublicIpAddresses[0]
-                if public_ip:
-                    running_instances[ins.InstanceId] = public_ip
+                if ins.PrivateIpAddresses:
+                    private_ip = ins.PrivateIpAddresses[0]
+                running_instances[ins.InstanceId] = (public_ip, private_ip)
             elif state in {"PENDING", "STARTING", "STOPPING", "STOPPED", "REBOOTING", "LAUNCH_FAILED"}:
                 pending_instances.add(ins.InstanceId)
         time.sleep(0.5)
