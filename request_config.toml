@@ -14,12 +14,6 @@ name = "ap-southeast-1"
 # count 设为 0 或者注释掉可以跳过区域
 count = 10
 
-# 尝试在同一个 zone 申请全部节点的阈值，count 超出则直接开始多 zone 尝试，默认 50
-# zone_max_nodes = 50
-
-# 每次 API 调用最多申请节点数量，0 代表没有上限。
-# max_nodes = 0
-
 [[aliyun.regions]]
 # 韩国（首尔）
 name = "ap-northeast-2"
@@ -79,11 +73,6 @@ name = "us-west-2"
 # count = 10
 
 [[aws.regions]]
-# 中国香港
-name = "ap-east-1"
-count = 10
-
-[[aws.regions]]
 # 巴林
 name = "me-south-1"
 count = 10
@@ -97,7 +86,7 @@ count = 10
 # 巴西（圣保罗）
 # 25 年 5 月加入“一带一路”
 name = "sa-east-1"
-# count = 10
+count = 10
 
 [[aws.instance_types]]
 name = "m6i.2xlarge"
@@ -110,52 +99,17 @@ default_user_name = "ubuntu"
 
 # 以下可修改
 user_tag = "lichenxing-alpha-5"
-image_name = "conflux-docker-registry"
+image_name = "conflux-docker-base"
 ssh_key_path = "./keys/ssh-key.pem"
 
-[[tencent.regions]]
-# 香港
-name = "ap-hongkong"
-count = 10
-
-[[tencent.regions]]
-# 新加坡
-name = "ap-singapore"
-count = 10
-
-[[tencent.regions]]
-# 印度尼西亚（雅加达）
-name = "ap-jakarta"
-count = 10
-
-[[tencent.regions]]
-# 泰国（曼谷）
-name = "ap-bangkok"
-count = 10
-
-[[tencent.regions]]
-# 利雅得
-name = "me-saudi-arabia"
-count = 10
-
-[[tencent.regions]]
-# 韩国（首尔）
-name = "ap-seoul"
-count = 10
-
-[[tencent.regions]]
-# 巴西（圣保罗）
-name = "sa-saopaulo"
-count = 10
-
 [[tencent.instance_types]]
-name = "S5.2XLARGE32"
+name = "S8.2XLARGE32"
 nodes = 1
 
 [[tencent.instance_types]]
-name = "SA5.2XLARGE32"
+name = "SA9.2XLARGE32"
 nodes = 1
 
 [[tencent.instance_types]]
-name = "S3.2XLARGE32"
+name = "S9.2XLARGE32"
 nodes = 1

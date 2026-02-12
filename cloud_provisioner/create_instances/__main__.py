@@ -14,6 +14,7 @@ from loguru import logger
 
 from ..aliyun_provider.client_factory import AliyunClient
 from ..aws_provider.client_factory import AwsClient
+from ..tencent_provider.client_factory import TencentClient
 from ..host_spec import save_hosts
 from ..provider_interface import IEcsClient
 
@@ -132,8 +133,12 @@ if __name__ == "__main__":
             sys.exit(1)
     
     if not args.network_only:
-        total_nodes = config.aws.total_nodes + config.aliyun.total_nodes
-        logger.success(f"计划启动 {total_nodes} 个节点，aws {config.aws.total_nodes}, aliyun {config.aliyun.total_nodes}")
+        total_nodes = config.aws.total_nodes + config.aliyun.total_nodes + config.tencent.total_nodes
+        logger.success(f"计划启动 {total_nodes} 个节点，aws {config.aws.total_nodes}, aliyun {config.aliyun.total_nodes}, tencent {config.tencent.total_nodes}")
+        
+    if config.tencent.total_nodes > 0:
+        tencent_client = TencentClient.load_from_env()
+        cloud_tasks.append((tencent_client, config.tencent))
         
     barrier = threading.Barrier(len(cloud_tasks))
         

@@ -39,10 +39,7 @@ def create_instances_in_zone(
     min_amount: int,
 ) -> Tuple[list[str], CreateInstanceError]:
     disk_size = cfg.disk_size or 20
-    disk_category = cfg.disk_category or "cloud_essd"
-    disk = RunInstancesRequestSystemDisk(size=str(disk_size))
-    if disk_category:
-        disk.category = disk_category
+    disk = RunInstancesRequestSystemDisk(size=str(disk_size), category="cloud_essd")
     name = f"{cfg.instance_name_prefix}-{int(time.time())}"
         
     req = RunInstancesRequest(
@@ -66,7 +63,7 @@ def create_instances_in_zone(
         req.system_disk = disk
 
     if cfg.use_spot:
-        req.spot_strategy = cfg.spot_strategy or "SpotAsPriceGo"
+        req.spot_strategy = "SpotAsPriceGo"
 
     try:
         resp = client.run_instances(req)
@@ -110,8 +107,12 @@ def describe_instance_status(client: Client, region_id: str, instance_ids: List[
             region_id=region_id, page_size=100, instance_ids=json.dumps(query_chunk)))
         instance_status = rep.body.instances.instance
 
-        running_instances.update(
-            {i.instance_id: i.public_ip_address.ip_address[0] for i in instance_status if i.status in ["Running"]}) # pyright: ignore[reportOptionalSubscript]
+        for instance in instance_status:
+            if instance.status not in ["Running"]:
+                continue
+            public_ip = instance.public_ip_address.ip_address[0]
+            private_ip = instance.vpc_attributes.private_ip_address.ip_address[0] or instance.inner_ip_address.ip_address[0]
+            running_instances[instance.instance_id] = (public_ip, private_ip)
         
         # 阿里云启动阶段也可能读到 instance 是 stopped 的状态
         pending_instances.update({i.instance_id for i in instance_status if i.status in [

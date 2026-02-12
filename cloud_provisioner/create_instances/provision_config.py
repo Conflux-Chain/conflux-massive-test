@@ -32,6 +32,7 @@ class CloudConfig(BaseModel):
 class ProvisionConfig(BaseModel):
     aliyun: CloudConfig
     aws: CloudConfig
+    tencent: CloudConfig
 
 if __name__=="__main__":
     with open("request_config.toml", "rb") as f:

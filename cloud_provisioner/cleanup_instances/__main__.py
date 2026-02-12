@@ -8,6 +8,7 @@ import argparse
 from cloud_provisioner.args_check import check_user_prefix_with_config_file, check_empty_user_prefix
 from ..aliyun_provider.client_factory import AliyunClient
 from ..aws_provider.client_factory import AwsClient
+from ..tencent_provider.client_factory import TencentClient
 from .types import InstanceInfoWithTag
 from ..create_instances.instance_config import DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE, DEFAULT_USER_TAG_KEY
 from ..provider_interface import IEcsClient
@@ -28,6 +29,15 @@ AWS_REGIONS = [
     "sa-east-1",   # São Paulo
     "af-south-1",  # Cape Town
     "me-south-1",  # Bahrain
+]
+TENCENT_REGIONS = [
+    "ap-hongkong",
+    "ap-singapore",  # Singapore
+    "ap-bangkok",
+    "ap-jakarta",    # Jakarta
+    "me-saudi-arabia",  # Riyadh
+    "ap-seoul",      # Seoul
+    "sa-saopaulo",   # São Paulo
 ]
         
 
@@ -70,13 +80,15 @@ if __name__ == "__main__":
 
     aliyun_client = AliyunClient.load_from_env()
     aws_client = AwsClient.new()
+    tencent_client = TencentClient.load_from_env()
     user_prefix = args.user_prefix
 
     with ThreadPoolExecutor() as executor:
         predicate = lambda instance: check_tag(instance, user_prefix)
         futures = [
             executor.submit(delete_instances, aliyun_client, ALI_REGIONS, predicate=predicate),
-            executor.submit(delete_instances, aws_client, AWS_REGIONS, predicate=predicate)
+            executor.submit(delete_instances, aws_client, AWS_REGIONS, predicate=predicate),
+            executor.submit(delete_instances, tencent_client, TENCENT_REGIONS, predicate=predicate),
         ]
         from concurrent.futures import wait
 
