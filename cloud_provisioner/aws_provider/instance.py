@@ -14,6 +14,8 @@ from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TA
 
 from mypy_boto3_ec2.client import EC2Client
 
+MAX_CREATE_PER_REQUEST = 500
+
 
 def _instance_tags(cfg: InstanceConfig) -> List[dict]:
     return [
@@ -43,73 +45,101 @@ def create_instances_in_zone(
     instance_type: InstanceType,
     max_amount: int,
     min_amount: int,
-) -> Tuple[list[str], CreateInstanceError]:   
-    name = f"{cfg.instance_name_prefix}-{int(time.time())}"
-    
-    tags = _instance_tags(cfg) + [{'Key': 'Name', 'Value': name}]
-    instance_market_options = None
-    if cfg.use_spot:
-        instance_market_options = {"MarketType": "spot"}
+) -> Tuple[list[str], CreateInstanceError]:
+    def _create_single(single_max: int, single_min: int) -> Tuple[list[str], CreateInstanceError]:
+        name = f"{cfg.instance_name_prefix}-{int(time.time())}"
 
-    try:
-        params = {
-            "ImageId": region_info.image_id,
-            "MinCount": min_amount,
-            "MaxCount": max_amount,
-            "KeyName": region_info.key_pair_name,
-            "InstanceType": instance_type.name,  # pyright: ignore[reportArgumentType]
-            "NetworkInterfaces": [{
-                "AssociatePublicIpAddress": True,
-                "DeviceIndex": 0,
-                "SubnetId": zone_info.v_switch_id,
-                "Groups": [region_info.security_group_id]
-            }],
-            "Placement": {"AvailabilityZone": zone_info.id},
-            "BlockDeviceMappings": [{
-                "DeviceName": "/dev/sda1",
-                "Ebs": {
-                    "VolumeSize": cfg.disk_size,
-                    "VolumeType": "gp3",
-                    "Iops": 3000,
-                    "Throughput": 300,
-                    "DeleteOnTermination": True
-                }
-            }],
-            "TagSpecifications": [{
-                "ResourceType": "instance",
-                "Tags": tags
-            }]  # pyright: ignore[reportArgumentType]
-        }
-        if instance_market_options is not None:
-            params["InstanceMarketOptions"] = instance_market_options
+        tags = _instance_tags(cfg) + [{'Key': 'Name', 'Value': name}]
+        instance_market_options = None
+        if cfg.use_spot:
+            instance_market_options = {"MarketType": "spot"}
 
-        response = client.run_instances(**params)
-        ids = [instance['InstanceId'] for instance in response['Instances']]
-        assert ids is not None
-        logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={min_amount}~{max_amount}")
-        return ids, CreateInstanceError.Nil
-    except ClientError as exc:
-        code = exc.response['Error']['Code']
-        error_type = CreateInstanceError.Others
-        
-        if code == "InsufficientInstanceCapacity":
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
-            error_type = CreateInstanceError.NoStock
-            
-        elif code == "Unsupported":
-            logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
-            error_type = CreateInstanceError.NoInstanceType
-            
-        else:
+        try:
+            params = {
+                "ImageId": region_info.image_id,
+                "MinCount": single_min,
+                "MaxCount": single_max,
+                "KeyName": region_info.key_pair_name,
+                "InstanceType": instance_type.name,  # pyright: ignore[reportArgumentType]
+                "NetworkInterfaces": [{
+                    "AssociatePublicIpAddress": True,
+                    "DeviceIndex": 0,
+                    "SubnetId": zone_info.v_switch_id,
+                    "Groups": [region_info.security_group_id]
+                }],
+                "Placement": {"AvailabilityZone": zone_info.id},
+                "BlockDeviceMappings": [{
+                    "DeviceName": "/dev/sda1",
+                    "Ebs": {
+                        "VolumeSize": cfg.disk_size,
+                        "VolumeType": "gp3",
+                        "Iops": 3000,
+                        "Throughput": 300,
+                        "DeleteOnTermination": True
+                    }
+                }],
+                "TagSpecifications": [{
+                    "ResourceType": "instance",
+                    "Tags": tags
+                }]  # pyright: ignore[reportArgumentType]
+            }
+            if instance_market_options is not None:
+                params["InstanceMarketOptions"] = instance_market_options
+
+            response = client.run_instances(**params)
+            ids = [instance['InstanceId'] for instance in response['Instances']]
+            assert ids is not None
+            logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={single_min}~{single_max}")
+            return ids, CreateInstanceError.Nil
+        except ClientError as exc:
+            code = exc.response['Error']['Code']
+            error_type = CreateInstanceError.Others
+
+            if code == "InsufficientInstanceCapacity":
+                logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={single_min}~{single_max}")
+                error_type = CreateInstanceError.NoStock
+
+            elif code == "Unsupported":
+                logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={single_min}~{single_max}")
+                error_type = CreateInstanceError.NoInstanceType
+
+            else:
+                logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+                logger.error(f"{exc.__dict__}")
+                logger.error(traceback.format_exc())
+
+            return [], error_type
+        except Exception as exc:
             logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-            logger.error(f"{exc.__dict__}")
             logger.error(traceback.format_exc())
-            
-        return [], error_type
-    except Exception as exc:
-        logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-        logger.error(traceback.format_exc())
-        return [], CreateInstanceError.Others
+            return [], CreateInstanceError.Others
+
+    if max_amount <= 0:
+        return [], CreateInstanceError.Nil
+
+    all_ids: list[str] = []
+    while len(all_ids) < max_amount:
+        remaining = max_amount - len(all_ids)
+        chunk_max = min(MAX_CREATE_PER_REQUEST, remaining)
+        remaining_min = max(min_amount - len(all_ids), 0)
+        chunk_min = min(remaining_min, chunk_max)
+        if chunk_min <= 0:
+            chunk_min = 1
+
+        ids, err = _create_single(chunk_max, chunk_min)
+        if ids:
+            all_ids.extend(ids)
+            continue
+
+        if not all_ids:
+            return [], err
+
+        logger.warning(f"Stop creating more instances after partial success: requested={max_amount}, actual={len(all_ids)}")
+        break
+
+    if len(all_ids) < max_amount:
+        logger.warning(f"Partially created instances at {region_info.id}/{zone_info.id}: requested={max_amount}, actual={len(all_ids)}")
+    return all_ids, CreateInstanceError.Nil
     
 def describe_instance_status(client: EC2Client, instance_ids: List[str]):
     running_instances = dict()

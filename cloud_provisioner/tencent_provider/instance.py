@@ -12,6 +12,8 @@ from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType, CreateInstanceError
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 
+MAX_CREATE_PER_REQUEST = 100
+
 
 def _instance_tags(cfg: InstanceConfig) -> List[cvm_models.Tag]:
     common_tag = cvm_models.Tag()
@@ -57,69 +59,97 @@ def create_instances_in_zone(
     max_amount: int,
     min_amount: int,
 ) -> tuple[list[str], CreateInstanceError]:
-    name = f"{cfg.instance_name_prefix}-{int(time.time())}"
+    def _create_single(single_max: int, single_min: int) -> tuple[list[str], CreateInstanceError]:
+        name = f"{cfg.instance_name_prefix}-{int(time.time())}"
 
-    placement = cvm_models.Placement()
-    placement.Zone = zone_info.id
+        placement = cvm_models.Placement()
+        placement.Zone = zone_info.id
 
-    system_disk = cvm_models.SystemDisk()
-    system_disk.DiskType = "CLOUD_HSSD"
-    system_disk.DiskSize = cfg.disk_size
+        system_disk = cvm_models.SystemDisk()
+        system_disk.DiskType = "CLOUD_HSSD"
+        system_disk.DiskSize = cfg.disk_size
 
-    vpc = cvm_models.VirtualPrivateCloud()
-    vpc.VpcId = region_info.vpc_id
-    vpc.SubnetId = zone_info.v_switch_id
+        vpc = cvm_models.VirtualPrivateCloud()
+        vpc.VpcId = region_info.vpc_id
+        vpc.SubnetId = zone_info.v_switch_id
 
-    internet = cvm_models.InternetAccessible()
-    internet.InternetChargeType = "TRAFFIC_POSTPAID_BY_HOUR"
-    internet.InternetMaxBandwidthOut = cfg.internet_max_bandwidth_out
-    internet.PublicIpAssigned = cfg.internet_max_bandwidth_out > 0
+        internet = cvm_models.InternetAccessible()
+        internet.InternetChargeType = "TRAFFIC_POSTPAID_BY_HOUR"
+        internet.InternetMaxBandwidthOut = cfg.internet_max_bandwidth_out
+        internet.PublicIpAssigned = cfg.internet_max_bandwidth_out > 0
 
-    key_id = _get_key_id_by_name(client, region_info.key_pair_name)
-    login = cvm_models.LoginSettings()
-    login.KeyIds = [key_id]
+        key_id = _get_key_id_by_name(client, region_info.key_pair_name)
+        login = cvm_models.LoginSettings()
+        login.KeyIds = [key_id]
 
-    tag_spec = cvm_models.TagSpecification()
-    tag_spec.ResourceType = "instance"
-    tag_spec.Tags = _instance_tags(cfg)
+        tag_spec = cvm_models.TagSpecification()
+        tag_spec.ResourceType = "instance"
+        tag_spec.Tags = _instance_tags(cfg)
 
-    req = cvm_models.RunInstancesRequest()
-    req.InstanceChargeType = "POSTPAID_BY_HOUR"
-    req.Placement = placement
-    req.InstanceType = instance_type.name
-    req.ImageId = region_info.image_id
-    req.SystemDisk = system_disk
-    req.VirtualPrivateCloud = vpc
-    req.InternetAccessible = internet
-    req.InstanceCount = max_amount
-    req.MinCount = min_amount
-    req.InstanceName = name
-    req.LoginSettings = login
-    req.SecurityGroupIds = [region_info.security_group_id]
-    req.TagSpecification = [tag_spec]
+        req = cvm_models.RunInstancesRequest()
+        req.InstanceChargeType = "POSTPAID_BY_HOUR"
+        req.Placement = placement
+        req.InstanceType = instance_type.name
+        req.ImageId = region_info.image_id
+        req.SystemDisk = system_disk
+        req.VirtualPrivateCloud = vpc
+        req.InternetAccessible = internet
+        req.InstanceCount = single_max
+        req.MinCount = single_min
+        req.InstanceName = name
+        req.LoginSettings = login
+        req.SecurityGroupIds = [region_info.security_group_id]
+        req.TagSpecification = [tag_spec]
 
-    try:
-        resp = client.RunInstances(req)
-        ids = resp.InstanceIdSet or []
-        logger.success(f"Created instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={min_amount}~{max_amount}")
-        return ids, CreateInstanceError.Nil
-    except TencentCloudSDKException as exc:
-        e = traceback.format_exc()
-        code = exc.code or ""
-        if any(key in code for key in ["ResourceInsufficient", "Insufficient", "NoStock"]):
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
-            return [], CreateInstanceError.NoStock
-        if any(key in code for key in ["Unsupported", "InvalidParameter", "UnsupportedOperation"]):
-            logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
-            return [], CreateInstanceError.NoInstanceType
-        logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-        logger.error(e)
-        return [], CreateInstanceError.Others
-    except Exception as exc:
-        e = traceback.format_exc()
-        logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-        logger.error(e)
-        return [], CreateInstanceError.Others
+        try:
+            resp = client.RunInstances(req)
+            ids = resp.InstanceIdSet or []
+            logger.success(f"Created instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={single_min}~{single_max}")
+            return ids, CreateInstanceError.Nil
+        except TencentCloudSDKException as exc:
+            e = traceback.format_exc()
+            code = exc.code or ""
+            if any(key in code for key in ["ResourceInsufficient", "Insufficient", "NoStock"]):
+                logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={single_min}~{single_max}")
+                return [], CreateInstanceError.NoStock
+            if any(key in code for key in ["Unsupported", "InvalidParameter", "UnsupportedOperation"]):
+                logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={single_min}~{single_max}")
+                return [], CreateInstanceError.NoInstanceType
+            logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+            logger.error(e)
+            return [], CreateInstanceError.Others
+        except Exception as exc:
+            e = traceback.format_exc()
+            logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+            logger.error(e)
+            return [], CreateInstanceError.Others
+
+    if max_amount <= 0:
+        return [], CreateInstanceError.Nil
+
+    all_ids: list[str] = []
+    while len(all_ids) < max_amount:
+        remaining = max_amount - len(all_ids)
+        chunk_max = min(MAX_CREATE_PER_REQUEST, remaining)
+        remaining_min = max(min_amount - len(all_ids), 0)
+        chunk_min = min(remaining_min, chunk_max)
+        if chunk_min <= 0:
+            chunk_min = 1
+
+        ids, err = _create_single(chunk_max, chunk_min)
+        if ids:
+            all_ids.extend(ids)
+            continue
+
+        if not all_ids:
+            return [], err
+
+        logger.warning(f"Stop creating more instances after partial success: requested={max_amount}, actual={len(all_ids)}")
+        break
+
+    if len(all_ids) < max_amount:
+        logger.warning(f"Partially created instances at {region_info.id}/{zone_info.id}: requested={max_amount}, actual={len(all_ids)}")
+    return all_ids, CreateInstanceError.Nil
 
 
 def describe_instance_status(client: CvmClient, instance_ids: List[str]) -> InstanceStatus:

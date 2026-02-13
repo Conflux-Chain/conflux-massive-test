@@ -14,6 +14,8 @@ from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, Insta
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 from alibabacloud_ecs20140526.client import Client
     
+MAX_CREATE_PER_REQUEST = 100
+
 
 def _instance_tags(cfg: InstanceConfig) -> List[RunInstancesRequestTag]:
     return [
@@ -37,52 +39,79 @@ def create_instances_in_zone(
     instance_type: InstanceType,
     max_amount: int,
     min_amount: int,
-) -> Tuple[list[str], CreateInstanceError]:    
-    disk = RunInstancesRequestSystemDisk(category="cloud_essd", size=str(cfg.disk_size))
-    name = f"{cfg.instance_name_prefix}-{int(time.time())}"
-        
-    req = RunInstancesRequest(
-        region_id=region_info.id,
-        zone_id=zone_info.id,
-        image_id=region_info.image_id,
-        instance_type=instance_type.name,
-        security_group_id=region_info.security_group_id,
-        v_switch_id=zone_info.v_switch_id,
-        key_pair_name=region_info.key_pair_name,
-        instance_name=name,
-        internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
-        internet_charge_type="PayByTraffic",
-        instance_charge_type="PostPaid",
-        tag=_instance_tags(cfg),
-        amount=max_amount,
-        min_amount=min_amount,
-        system_disk=disk,
-    )
+) -> Tuple[list[str], CreateInstanceError]:
+    def _create_single(single_max: int, single_min: int) -> Tuple[list[str], CreateInstanceError]:
+        disk = RunInstancesRequestSystemDisk(category="cloud_essd", size=str(cfg.disk_size))
+        name = f"{cfg.instance_name_prefix}-{int(time.time())}"
 
-    try:
-        resp = client.run_instances(req)
-        ids = resp.body.instance_id_sets.instance_id_set
-        assert ids is not None
-        logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}")
-        # ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
-        return ids, CreateInstanceError.Nil
-    except Exception as exc:
-        code = getattr(exc, "code", None)
-        error_type = CreateInstanceError.Others
-        
-        if code == "OperationDenied.NoStock":
-            error_type = CreateInstanceError.NoStock
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
-        
-        elif code == "InvalidResourceType.NotSupported":
-            error_type = CreateInstanceError.NoInstanceType
-            logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
-        
-        else:
-            logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-            logger.error(traceback.format_exc())
-        
-        return [], error_type
+        req = RunInstancesRequest(
+            region_id=region_info.id,
+            zone_id=zone_info.id,
+            image_id=region_info.image_id,
+            instance_type=instance_type.name,
+            security_group_id=region_info.security_group_id,
+            v_switch_id=zone_info.v_switch_id,
+            key_pair_name=region_info.key_pair_name,
+            instance_name=name,
+            internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
+            internet_charge_type="PayByTraffic",
+            instance_charge_type="PostPaid",
+            tag=_instance_tags(cfg),
+            amount=single_max,
+            min_amount=single_min,
+            system_disk=disk,
+        )
+
+        try:
+            resp = client.run_instances(req)
+            ids = resp.body.instance_id_sets.instance_id_set
+            assert ids is not None
+            logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}")
+            return ids, CreateInstanceError.Nil
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            error_type = CreateInstanceError.Others
+
+            if code == "OperationDenied.NoStock":
+                error_type = CreateInstanceError.NoStock
+                logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
+
+            elif code == "InvalidResourceType.NotSupported":
+                error_type = CreateInstanceError.NoInstanceType
+                logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
+
+            else:
+                logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
+                logger.error(traceback.format_exc())
+
+            return [], error_type
+
+    if max_amount <= 0:
+        return [], CreateInstanceError.Nil
+
+    all_ids: list[str] = []
+    while len(all_ids) < max_amount:
+        remaining = max_amount - len(all_ids)
+        chunk_max = min(MAX_CREATE_PER_REQUEST, remaining)
+        remaining_min = max(min_amount - len(all_ids), 0)
+        chunk_min = min(remaining_min, chunk_max)
+        if chunk_min <= 0:
+            chunk_min = 1
+
+        ids, err = _create_single(chunk_max, chunk_min)
+        if ids:
+            all_ids.extend(ids)
+            continue
+
+        if not all_ids:
+            return [], err
+
+        logger.warning(f"Stop creating more instances after partial success: requested={max_amount}, actual={len(all_ids)}")
+        break
+
+    if len(all_ids) < max_amount:
+        logger.warning(f"Partially created instances at {region_info.id}/{zone_info.id}: requested={max_amount}, actual={len(all_ids)}")
+    return all_ids, CreateInstanceError.Nil
     
 def describe_instance_status(client: Client, region_id: str, instance_ids: List[str]):
     running_instances = dict()
