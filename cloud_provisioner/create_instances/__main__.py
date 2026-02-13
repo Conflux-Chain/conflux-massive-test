@@ -23,15 +23,23 @@ from .instance_provisioner import create_instances_in_region
 from .network_infra import InfraProvider, InfraRequest
 from .types import InstanceType
 from .provision_config import CloudConfig, ProvisionConfig, ProvisionRegionConfig
+from .region_backfill import backfill_shortfall, count_nodes, healthy_regions_for_backfill, run_regions_with_config
 
 
-def create_instances(client: IEcsClient, cloud_config: CloudConfig, barrier: threading.Barrier, allow_create: bool, infra_only: bool):
+def create_instances(
+    client: IEcsClient,
+    cloud_config: CloudConfig,
+    barrier: threading.Barrier,
+    allow_create: bool,
+    infra_only: bool,
+    allow_backfill: bool,
+):
     infra_provider = _ensure_network_infra(client, cloud_config, allow_create)
 
     if infra_only or infra_provider is None:
         return []
     else:
-        return create_instances_in_multi_region(client, cloud_config, infra_provider)
+        return create_instances_in_multi_region(client, cloud_config, infra_provider, allow_backfill=allow_backfill)
     
 def _ensure_network_infra(client: IEcsClient, cloud_config: CloudConfig, allow_create) -> Optional[InfraProvider]:
     try:
@@ -51,11 +59,17 @@ def _ensure_network_infra(client: IEcsClient, cloud_config: CloudConfig, allow_c
     
     return infra_provider
     
-def create_instances_in_multi_region(client: IEcsClient, cloud_config: CloudConfig, infra_provider: InfraProvider):
+def create_instances_in_multi_region(
+    client: IEcsClient,
+    cloud_config: CloudConfig,
+    infra_provider: InfraProvider,
+    *,
+    allow_backfill: bool = True,
+):
     instance_config = InstanceConfig(user_tag_value=cloud_config.user_tag)
     instance_types = [InstanceType(i.name, i.nodes)
                       for i in cloud_config.instance_types]
-    regions = filter(lambda reg: reg.count>0, cloud_config.regions)
+    regions = [region for region in cloud_config.regions if region.count > 0]
 
     def _create_in_region(provision_config: ProvisionRegionConfig):
         region_id = provision_config.name
@@ -67,9 +81,38 @@ def create_instances_in_multi_region(client: IEcsClient, cloud_config: CloudConf
                                           ssh_user=cloud_config.default_user_name, 
                                           provider=cloud_config.provider)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(_create_in_region, regions))
-        hosts = list(chain.from_iterable(results))
+    target_total_nodes = cloud_config.total_nodes
+    region_results = run_regions_with_config(_create_in_region, regions)
+    hosts = list(chain.from_iterable(result["hosts"] for result in region_results))
+    created_nodes = count_nodes(hosts)
+    shortfall = target_total_nodes - created_nodes
+
+    underfilled = [
+        result for result in region_results
+        if result["actual_nodes"] < result["requested_nodes"]
+    ]
+    if underfilled:
+        detail = ", ".join(
+            f"{result['region']}({result['actual_nodes']}/{result['requested_nodes']})"
+            for result in underfilled
+        )
+        logger.warning(f"Regions under target: {detail}")
+
+    if shortfall > 0 and allow_backfill:
+        healthy_regions = healthy_regions_for_backfill(region_results)
+        if healthy_regions:
+            logger.warning(f"Total nodes shortfall={shortfall}, try backfill in healthy regions")
+            extra_hosts, remaining = backfill_shortfall(_create_in_region, healthy_regions, shortfall)
+            hosts.extend(extra_hosts)
+            shortfall = remaining
+    elif shortfall > 0 and not allow_backfill:
+        logger.warning(f"Backfill disabled, keep shortfall={shortfall}")
+
+    final_nodes = count_nodes(hosts)
+    if shortfall <= 0:
+        logger.success(f"{cloud_config.provider} launch complete: target_nodes={target_total_nodes}, actual_nodes={final_nodes}")
+    else:
+        logger.error(f"{cloud_config.provider} launch incomplete: target_nodes={target_total_nodes}, actual_nodes={final_nodes}, shortfall={shortfall}")
 
     return hosts
 
@@ -98,6 +141,13 @@ def make_parser():
         action="store_true",
         help="只进行 Network Infra 阶段，不创建实例"
     )
+    parser.add_argument(
+        "--no-backfill",
+        action="store_false",
+        dest="allow_backfill",
+        help="禁用跨区域补足节点"
+    )
+    parser.set_defaults(allow_backfill=True)
     return parser
 
 
@@ -144,7 +194,7 @@ if __name__ == "__main__":
         
     with ThreadPoolExecutor() as executor:
         futures = [
-            executor.submit(create_instances, client, cloud_config, barrier, args.allow_create, args.network_only)
+            executor.submit(create_instances, client, cloud_config, barrier, args.allow_create, args.network_only, args.allow_backfill)
             for client, cloud_config in cloud_tasks
         ]
         
