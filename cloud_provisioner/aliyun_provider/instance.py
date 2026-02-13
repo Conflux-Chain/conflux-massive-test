@@ -18,7 +18,8 @@ from alibabacloud_ecs20140526.client import Client
 def _instance_tags(cfg: InstanceConfig) -> List[RunInstancesRequestTag]:
     return [
         RunInstancesRequestTag(key=DEFAULT_COMMON_TAG_KEY, value=DEFAULT_COMMON_TAG_VALUE),
-        RunInstancesRequestTag(key=cfg.user_tag_key, value=cfg.user_tag_value)
+        RunInstancesRequestTag(key=cfg.user_tag_key, value=cfg.user_tag_value),
+        RunInstancesRequestTag(key="team", value="core"),
     ]
     
 def as_instance_info_with_tag(rep: DescribeInstancesResponseBodyInstancesInstance):
