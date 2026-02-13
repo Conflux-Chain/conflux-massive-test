@@ -2,7 +2,11 @@ from remote_simulation.port_allocation import p2p_port, rpc_port, pubsub_port, r
 
 # REMOTE_IMAGE_TAG = "public.ecr.aws/s9d3x9f5/conflux-massive-test/conflux-node:latest"
 REMOTE_IMAGE_TAG = "lylcx2007/conflux-node:latest"
-IMAGE_TAG="conflux-node:latest"
+IMAGE_TAG = "conflux-node:latest"
+REGISTRY_IMAGE = "conflux-node:base"
+REGISTRY_PORT = 5000
+REMOTE_SCRIPT_PULL_DOCKERHUB = "/tmp/cfx_pull_image_from_dockerhub_and_push_local.sh"
+REMOTE_SCRIPT_PULL_REGISTRY = "/tmp/cfx_pull_image_from_registry_and_push_local.sh"
 
 CONTAINER_PREFIX = "conflux_node_"
 
@@ -62,6 +66,32 @@ def stop_all_nodes() -> str:
 
 def destory_all_nodes() -> str:
     return f"sudo docker ps -aq --filter name={CONTAINER_PREFIX} | xargs -r sudo docker rm -f && sudo rm -rf ~/log* && sudo rm -rf ~/output*"
+
+
+def pull_image_from_dockerhub_and_push_local() -> str:
+    return " ".join(
+        (
+            "bash",
+            REMOTE_SCRIPT_PULL_DOCKERHUB,
+            REMOTE_IMAGE_TAG,
+            IMAGE_TAG,
+            REGISTRY_IMAGE,
+            str(REGISTRY_PORT),
+        )
+    )
+
+
+def pull_image_from_registry_and_push_local(registry_host: str) -> str:
+    return " ".join(
+        (
+            "bash",
+            REMOTE_SCRIPT_PULL_REGISTRY,
+            registry_host,
+            IMAGE_TAG,
+            REGISTRY_IMAGE,
+            str(REGISTRY_PORT),
+        )
+    )
 
 def pull_image():
     return f"sudo docker pull {REMOTE_IMAGE_TAG} && sudo docker tag {REMOTE_IMAGE_TAG} {IMAGE_TAG}"

@@ -3,13 +3,14 @@
 
 This script reads an inventory (by default `hosts.json`), launches nodes, runs the experiment, and collects logs.
 """
-import json
+import ipaddress
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
 from itertools import chain
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import requests
 from loguru import logger
@@ -106,6 +107,104 @@ def launch_remote_nodes(hosts: List[HostSpec], config_file, pull_docker_image: b
     return nodes
 
 
+def _sorted_hosts_by_private_ip(hosts: List[HostSpec]) -> List[HostSpec]:
+    def _key(h: HostSpec):
+        try:
+            return ipaddress.ip_address(h.private_ip or h.ip)
+        except ValueError:
+            return ipaddress.ip_address(h.ip)
+
+    return sorted(hosts, key=_key)
+
+
+def _prepare_images_by_zone(hosts: List[HostSpec]) -> None:
+    script_dir = Path(__file__).resolve().parent / "auxiliary" / "scripts" / "remote"
+    dockerhub_script = script_dir / "cfx_pull_image_from_dockerhub_and_push_local.sh"
+    registry_script = script_dir / "cfx_pull_image_from_registry_and_push_local.sh"
+    if not dockerhub_script.exists():
+        raise FileNotFoundError(f"missing {dockerhub_script}")
+    if not registry_script.exists():
+        raise FileNotFoundError(f"missing {registry_script}")
+
+    zones: Dict[str, List[HostSpec]] = defaultdict(list)
+    for host in hosts:
+        zones[host.zone].append(host)
+
+    def _prepare_zone(zone_hosts: List[HostSpec]) -> None:
+        ordered = _sorted_hosts_by_private_ip(zone_hosts)
+        if not ordered:
+            return
+
+        def _prepare_host(i: int, host: HostSpec, futures: list) -> bool:
+            host_ip = host.private_ip or host.ip
+            try:
+                shell_cmds.scp(str(dockerhub_script), host.ip, host.ssh_user, docker_cmds.REMOTE_SCRIPT_PULL_DOCKERHUB)
+                shell_cmds.scp(str(registry_script), host.ip, host.ssh_user, docker_cmds.REMOTE_SCRIPT_PULL_REGISTRY)
+                shell_cmds.ssh(
+                    host.ip,
+                    host.ssh_user,
+                    [
+                        "chmod",
+                        "+x",
+                        docker_cmds.REMOTE_SCRIPT_PULL_DOCKERHUB,
+                        docker_cmds.REMOTE_SCRIPT_PULL_REGISTRY,
+                    ],
+                )
+
+                if i == 0:
+                    logger.info(f"zone {host.zone}: seed {host_ip} pulls from dockerhub")
+                    shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_dockerhub_and_push_local())
+                    return True
+
+                ancestor = (i - 1) // 2
+                while ancestor is not None and ancestor >= 0:
+                    try:
+                        parent_ok = futures[ancestor].result()
+                    except Exception:
+                        parent_ok = False
+
+                    if parent_ok:
+                        parent = ordered[ancestor]
+                        registry_host = parent.private_ip or parent.ip
+                        logger.info(f"zone {host.zone}: {host_ip} pulls from {registry_host}")
+                        try:
+                            shell_cmds.ssh(
+                                host.ip,
+                                host.ssh_user,
+                                docker_cmds.pull_image_from_registry_and_push_local(registry_host),
+                            )
+                            return True
+                        except Exception as exc:
+                            logger.warning(f"zone {host.zone}: {host_ip} failed pulling from {registry_host}: {exc}")
+
+                    if ancestor == 0:
+                        ancestor = None
+                    else:
+                        ancestor = (ancestor - 1) // 2
+
+                logger.info(f"zone {host.zone}: {host_ip} fallback to dockerhub")
+                shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_dockerhub_and_push_local())
+                return True
+            except Exception as exc:
+                logger.warning(f"zone {host.zone}: {host_ip} image prepare failed: {exc}")
+                return False
+
+        with ThreadPoolExecutor(max_workers=min(128, max(1, len(ordered)))) as zone_executor:
+            futures: list = [None] * len(ordered)
+            for i, host in enumerate(ordered):
+                futures[i] = zone_executor.submit(_prepare_host, i, host, futures)
+            for f in futures:
+                try:
+                    f.result()
+                except Exception:
+                    pass
+
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(zones)))) as executor:
+        futures = [executor.submit(_prepare_zone, zone_hosts) for zone_hosts in zones.values()]
+        for f in futures:
+            f.result()
+
+
 def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     total_cnt = len(nodes)
     counter1 = AtomicCounter()
@@ -192,7 +291,10 @@ if __name__ == "__main__":
     log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
-    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=True)
+    logger.info("准备分区内镜像拉取 (dockerhub -> zone peers -> local registry)")
+    _prepare_images_by_zone(hosts)
+
+    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=False)
     if len(nodes) < simulation_config.target_nodes:
         # raise RuntimeError("Not all nodes started")
         logger.warning(f"启动了{len(nodes)}个节点，少于预期的{simulation_config.target_nodes}个节点")
