@@ -27,6 +27,7 @@ pub struct QuantileAgg {
     impl_kind: QuantileImpl,
     values: Vec<f64>,
     digest: Option<TDigest>,
+    sampled_values: Vec<f64>,
 }
 
 impl QuantileAgg {
@@ -39,6 +40,7 @@ impl QuantileAgg {
             impl_kind,
             values: Vec::new(),
             digest: None,
+            sampled_values: Vec::new(),
         }
     }
 
@@ -62,6 +64,10 @@ impl QuantileAgg {
                     merged.compress(200);
                 }
                 self.digest = Some(merged);
+
+                if self.count == 1 || self.count % 10 == 0 {
+                    self.sampled_values.push(x);
+                }
             }
         }
     }
@@ -88,11 +94,15 @@ impl QuantileAgg {
     fn quantile(&self, q: f64) -> f64 {
         match self.impl_kind {
             QuantileImpl::Brute => exact_quantile(&self.values, q),
-            QuantileImpl::TDigest => self
-                .digest
-                .as_ref()
-                .map(|d| d.estimate_quantile(q))
-                .unwrap_or(f64::NAN),
+            QuantileImpl::TDigest => {
+                if q >= 0.9 && !self.sampled_values.is_empty() {
+                    return exact_quantile(&self.sampled_values, q);
+                }
+                self.digest
+                    .as_ref()
+                    .map(|d| d.estimate_quantile(q))
+                    .unwrap_or(f64::NAN)
+            }
         }
     }
 }
