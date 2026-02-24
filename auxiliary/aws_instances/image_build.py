@@ -268,7 +268,6 @@ def main() -> None:
         disk_size=DISK_GB,
         internet_max_bandwidth_out=100,
         use_spot=True,
-        spot_strategy="SpotAsPriceGo",
     )
 
     # test_cfg = InstanceConfig(
@@ -277,7 +276,6 @@ def main() -> None:
     #     disk_size=DISK_GB,
     #     internet_max_bandwidth_out=100,
     #     use_spot=True,
-    #     spot_strategy="SpotAsPriceGo",
     # )
 
     builder_type = InstanceType(BUILDER_INSTANCE_TYPE, 1)
