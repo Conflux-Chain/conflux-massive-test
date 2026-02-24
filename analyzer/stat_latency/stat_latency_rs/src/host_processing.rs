@@ -9,7 +9,7 @@ use std::thread;
 
 use crate::io_utils::{load_host_log_from_archive, load_host_log_from_path, scan_logs};
 use crate::model::{AnalysisData, BlockInfo, HostBlocksLog, TxAgg};
-use crate::quantile::QuantileAgg;
+use crate::quantile::{QuantileAgg, QuantileImpl};
 use crate::stats::f64_from_stat;
 
 fn merge_sync_gap_stats(data: &mut AnalysisData, stats: Vec<HashMap<String, serde_json::Value>>) {
@@ -30,7 +30,11 @@ fn merge_sync_gap_stats(data: &mut AnalysisData, stats: Vec<HashMap<String, serd
     }
 }
 
-fn merge_host_blocks(data: &mut AnalysisData, host_blocks: HashMap<H256, crate::model::BlockJson>) {
+fn merge_host_blocks(
+    data: &mut AnalysisData,
+    host_blocks: HashMap<H256, crate::model::BlockJson>,
+    quantile_impl: QuantileImpl,
+) {
     for (block_hash, b) in host_blocks {
         let entry = data
             .blocks
@@ -50,7 +54,9 @@ fn merge_host_blocks(data: &mut AnalysisData, host_blocks: HashMap<H256, crate::
         }
         let per_block = data.block_dists.entry(block_hash).or_insert_with(HashMap::new);
         for (k, vs) in b.latencies {
-            let agg = per_block.entry(k).or_insert_with(QuantileAgg::new);
+            let agg = per_block
+                .entry(k)
+                .or_insert_with(|| QuantileAgg::new(quantile_impl));
             for v in vs {
                 agg.insert(v);
             }
@@ -92,10 +98,10 @@ fn merge_host_txs(data: &mut AnalysisData, host_txs: HashMap<H256, crate::model:
     }
 }
 
-fn merge_host_data(data: &mut AnalysisData, host: HostBlocksLog) {
+fn merge_host_data(data: &mut AnalysisData, host: HostBlocksLog, quantile_impl: QuantileImpl) {
     merge_sync_gap_stats(data, host.sync_cons_gap_stats);
     data.by_block_ratio.extend(host.by_block_ratio);
-    merge_host_blocks(data, host.blocks);
+    merge_host_blocks(data, host.blocks, quantile_impl);
     merge_host_txs(data, host.txs);
 }
 
@@ -131,7 +137,11 @@ fn collect_sources(log_path: &Path) -> Result<Vec<LogSource>> {
     Ok(sources)
 }
 
-pub fn load_and_merge_hosts(log_path: &Path, data: &mut AnalysisData) -> Result<()> {
+pub fn load_and_merge_hosts(
+    log_path: &Path,
+    data: &mut AnalysisData,
+    quantile_impl: QuantileImpl,
+) -> Result<()> {
     let sources = collect_sources(log_path)?;
     let mut host_processed: usize = 0;
     let total_hosts = sources.len();
@@ -151,7 +161,7 @@ pub fn load_and_merge_hosts(log_path: &Path, data: &mut AnalysisData) -> Result<
     if worker_count == 1 {
         for source in &sources {
             let host = load_source(source)?;
-            merge_host_data(data, host);
+            merge_host_data(data, host, quantile_impl);
             host_processed += 1;
             if host_processed % 100 == 0 {
                 eprintln!("processed {}/{} hosts...", host_processed, total_hosts);
@@ -185,7 +195,7 @@ pub fn load_and_merge_hosts(log_path: &Path, data: &mut AnalysisData) -> Result<
 
     for result in rx {
         let host = result?;
-        merge_host_data(data, host);
+        merge_host_data(data, host, quantile_impl);
         host_processed += 1;
         if host_processed % 100 == 0 {
             eprintln!("processed {}/{} hosts...", host_processed, total_hosts);

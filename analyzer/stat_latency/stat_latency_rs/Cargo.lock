@@ -870,6 +870,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sevenz-rust",
+ "tdigests",
  "walkdir",
 ]
 
@@ -901,6 +902,12 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tdigests"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8cc794f115de9eb67bb1bf4e8de08ac1b3d2f43bfdbec083636450da72a0986"
 
 [[package]]
 name = "term"

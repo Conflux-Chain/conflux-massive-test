@@ -16,10 +16,11 @@ use analyzer::{
     analyze_txs, build_block_row_values, build_tx_rows, collect_block_scalars,
     print_throughput_and_slowest,
 };
-use args::Args;
+use args::{Args, QuantileImplArg};
 use config::{default_latency_key_names, pivot_event_key_names};
 use host_processing::{load_and_merge_hosts, validate_and_filter_blocks};
 use model::AnalysisData;
+use quantile::QuantileImpl;
 use report::{
     add_block_rows, add_block_scalar_rows, add_custom_block_rows, add_sync_gap_rows, add_tx_rows,
     build_table_title,
@@ -39,9 +40,13 @@ fn main() -> Result<()> {
 
     let default_keys = default_latency_key_names();
     let pivot_keys = pivot_event_key_names();
+    let quantile_impl = match args.quantile_impl {
+        QuantileImplArg::Brute => QuantileImpl::Brute,
+        QuantileImplArg::Tdigest => QuantileImpl::TDigest,
+    };
     let mut data = AnalysisData::default();
     let t_load = Instant::now();
-    load_and_merge_hosts(&args.log_path, &mut data)?;
+    load_and_merge_hosts(&args.log_path, &mut data, quantile_impl)?;
     if profile_enabled {
         eprintln!("[profile] load_and_merge_hosts: {:.3}s", t_load.elapsed().as_secs_f64());
     }
