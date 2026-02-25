@@ -104,16 +104,20 @@ def create_instances_in_zone(
         logger.success(f"Created instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}, request={min_amount}~{max_amount}")
         return ids, CreateInstanceError.Nil
     except TencentCloudSDKException as exc:
-        e = traceback.format_exc()
         code = exc.code or ""
-        if any(key in code for key in ["ResourceInsufficient", "Insufficient", "NoStock"]):
-            logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
+        message = exc.message or ""
+        if code == "ResourceInsufficient.InsufficientOfferingMinimum":
+            logger.warning(f"No enough quota for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
             return [], CreateInstanceError.NoStock
-        if any(key in code for key in ["Unsupported", "InvalidParameter", "UnsupportedOperation"]):
-            logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
+        if code == "LimitExceeded.InstanceQuota":
+            logger.error(f"No enough quota for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}, visit https://cloud.tencent.com/document/product/213/107841 to request quota for {instance_type.name}")
+            return [], CreateInstanceError.NoStock
+        if code in ["ResourceUnavailable.InstanceType", "InvalidParameter"]:
+            logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}: {message}")
             return [], CreateInstanceError.NoInstanceType
-        logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")
-        logger.error(e)
+        logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, request={min_amount}~{max_amount}: {exc}")
+        logger.error(exc.__dict__)
+        logger.error(traceback.format_exc())
         return [], CreateInstanceError.Others
     except Exception as exc:
         e = traceback.format_exc()

@@ -75,7 +75,7 @@ def create_instances_in_zone(
             error_type = CreateInstanceError.NoStock
             logger.warning(f"No stock for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
         
-        elif code == "InvalidResourceType.NotSupported":
+        elif code == "InvalidResourceType.NotSupported" or code == "Zone.NotOnSale":
             error_type = CreateInstanceError.NoInstanceType
             logger.warning(f"Request not supported in {region_info.id}/{zone_info.id}, trying other zones... instance_type={instance_type.name}, amount={req.min_amount}~{req.amount}")
         
