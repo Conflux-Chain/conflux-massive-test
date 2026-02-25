@@ -47,13 +47,21 @@ class SingleNodeMetrics:
         path = pathlib.Path(directory_path)
         metrics_pq_path = path / "metrics.pq"
         metrics_log_path = path / "metrics.log"
+        metrics_7z_path = path / "metrics.log.7z"
 
         if metrics_pq_path.exists():
             return cls(path, pd.read_parquet(metrics_pq_path))
         elif metrics_log_path.exists():
             return cls(path, cls.preprocess_log_file(metrics_log_path, metrics_pq_path))
+        elif metrics_7z_path.exists():
+            return cls(path, cls.preprocess_log_file(metrics_7z_path, metrics_pq_path))
         else:
             raise FileNotFoundError(f"日志文件不存在: {directory_path}")
+    
+    @classmethod
+    def preprocess(cls, directory_path: str):
+        metrics = cls.load(directory_path)
+        del metrics
 
     @classmethod
     def preprocess_log_file(cls, log_file: pathlib.Path, pq_file: pathlib.Path) -> pd.DataFrame:
@@ -353,7 +361,7 @@ class GlobalMetricsStats:
         """
         预处理节点日志指标
         """
-        GlobalMetricsStats.for_each_node_parallel(log_dir, SingleNodeMetrics.load, "Pre-process nodes metrics log ")
+        GlobalMetricsStats.for_each_node_parallel(log_dir, SingleNodeMetrics.preprocess, "Pre-process nodes metrics log ")
 
     @classmethod
     def load_percentiles(cls, log_dir: str, percentile: int) -> Self:

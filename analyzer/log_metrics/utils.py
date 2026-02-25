@@ -7,7 +7,18 @@ from typing import Optional, Generator
 from types import SimpleNamespace
 import re
 from datetime import datetime, time
+import subprocess
 
+
+def iter_file(log_file: str):
+    if str(log_file).endswith("7z"):
+        with subprocess.Popen(['7z', 'e', '-so', log_file], stdout=subprocess.PIPE) as proc:
+            for line in proc.stdout:
+                yield line.decode().strip()
+    else:
+        with open(log_file, 'r') as f:
+            for line in f:
+                yield line
 
 def iter_log_file_items(log_file: str) -> Generator[tuple[np.int64, str, str, float], None, None]:
     """
@@ -21,28 +32,28 @@ def iter_log_file_items(log_file: str) -> Generator[tuple[np.int64, str, str, fl
     """
     # 提取指标的正则表达式，匹配格式为: "timestamp, module_name, Group, {metrics}"
     metric_pattern = re.compile(r'(\d+), ([0-9a-z_]+), Group, \{([^}]+)\}')
+        
+    for line in iter_file(log_file):
+        match = metric_pattern.search(line)
+        if not match:
+            continue
 
-    with open(log_file, 'r') as f:
-        for line in f:
-            match = metric_pattern.search(line)
-            if not match:
-                continue
+        timestamp = np.int64(match.group(1))
+        module_name = match.group(2)
+        metrics_part = match.group(3)
+        metrics_items = metrics_part.split(', ')
 
-            timestamp = np.int64(match.group(1))
-            module_name = match.group(2)
-            metrics_part = match.group(3)
-            metrics_items = metrics_part.split(', ')
-
-            for metric_item in metrics_items:
-                key_value = metric_item.split(': ')
-                if len(key_value) == 2:
-                    metric_key, metric_value = key_value
-                    metric_key = metric_key.strip()
-                    try:
-                        metric_value = float(metric_value)
-                        yield (timestamp, module_name, metric_key, metric_value)
-                    except ValueError:
-                        continue  # 跳过无法转换为浮点数的值
+        for metric_item in metrics_items:
+            key_value = metric_item.split(': ')
+            if len(key_value) == 2:
+                metric_key, metric_value = key_value
+                metric_key = metric_key.strip()
+                try:
+                    metric_value = float(metric_value)
+                    yield (timestamp, module_name, metric_key, metric_value)
+                except ValueError:
+                    continue  # 跳过无法转换为浮点数的值
+    
 
 
 @functools.lru_cache(maxsize=4096)

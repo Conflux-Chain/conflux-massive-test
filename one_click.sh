@@ -38,6 +38,10 @@ cleanup() {
     print_separator "正在执行清理操作: 销毁云服务实例..."
     $PYTHON -m cloud_provisioner.cleanup_instances -u $USER_TAG_PREFIX
     
+    if [[ -n "$PYTHON" && -n "$SHORT_USER_TAG_PREFIX" ]]; then
+        $PYTHON -m cloud_provisioner.cleanup_instances -u $SHORT_USER_TAG_PREFIX --yes
+    fi
+    
     # print_separator "跳过销毁实例"
     print_separator "清理结束"
 }
@@ -64,8 +68,11 @@ trap - EXIT
 # --- 步骤 3: 日志分析 ---
 print_separator "步骤 3/3：开始分析日志"
 
-python -m analyzer.stat_latency -l $LOG_PATH/nodes | tee $LOG_PATH/exp_latency.log
+find $LOG_PATH/nodes -name "conflux.log.new_blocks.7z" -print0 | xargs -0 -P4 -I{} sh -c 'f="{}"; 7z x -bso0 -bsp0 -o"$(dirname "$f")" "$f"'
 python -m analyzer.log_metrics -l $LOG_PATH/nodes -o $LOG_PATH/figs -m good_tps.m1 stat_unpacked_txs stat_ready_accounts
+
+./analyzer/stat_latency/stat_latency_rs/target/release/stat_latency_rs -l $LOG_PATH/nodes --quantile-impl tdigest | tee $LOG_PATH/exp_latency.log
+
 python -m analyzer.tree_graph_parse -l $LOG_PATH/nodes -o $LOG_PATH/figs | tee $LOG_PATH/confirmation.log
 
 print_separator "测试完毕，查看 $LOG_PATH 获得更多细节"
