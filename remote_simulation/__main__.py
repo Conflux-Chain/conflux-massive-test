@@ -12,7 +12,8 @@ from .launch_conflux_node import launch_remote_nodes
 from .network_connector import connect_nodes
 from .network_topology import NetworkTopology
 from .config_builder import SimulateOptions, ConfluxOptions, generate_config_file
-from .tools import collect_logs, init_tx_gen, wait_for_nodes_synced
+from .tools import collect_logs, init_tx_gen, wait_for_nodes_synced, collect_logs_v2
+from .image_prepare import prepare_images_by_zone
 
 
 from loguru import logger
@@ -82,7 +83,7 @@ if __name__ == "__main__":
     connect_peers = min(7, num_target_nodes - 1)
 
     simulation_config = SimulateOptions(target_nodes=num_target_nodes, num_blocks=2000, connect_peers=connect_peers, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
-    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = 100)
+    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = min(100, 100_000 // num_target_nodes))
     assert node_config.txgen_account_count * simulation_config.target_nodes <= 100_000
 
     config_file = generate_config_file(simulation_config, node_config)
@@ -91,9 +92,13 @@ if __name__ == "__main__":
     shutil.copy(config_file.path, f"{log_path}/config.toml")
 
     # 3. 启动节点
-    nodes = launch_remote_nodes(host_specs, config_file, pull_docker_image=True)
+    logger.info("准备分区内镜像拉取 (dockerhub -> zone peers -> local registry)")
+    prepare_images_by_zone(host_specs)
+    
+    nodes = launch_remote_nodes(host_specs, config_file, pull_docker_image=False)
     if len(nodes) < simulation_config.target_nodes:
-        raise Exception("Not all nodes started")
+        logger.warning(f"启动了{len(nodes)}个节点，少于预期的{simulation_config.target_nodes}个节点")
+        logger.warning("部分节点启动失败，继续进行测试")
     sample_node = random.choice(nodes)
     logger.info(f"随机选择观察节点 {sample_node.host_spec.ip} 来自 {sample_node.host_spec.provider} {sample_node.host_spec.zone}")
     logger.success("所有节点已启动，准备连接拓扑网络")
@@ -102,18 +107,24 @@ if __name__ == "__main__":
     topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers, latency_max = 0)
     for k, v in topology.peers.items():
         logger.debug(f"Node {nodes[k].id}({k}) has {len(v)} peers: {", ".join([str(i) for i in v])}")
-    connect_nodes(nodes, topology, min_peers=simulation_config.connect_peers - 1)
+    connect_nodes(nodes, topology, min_peers=simulation_config.connect_peers - 2)
     logger.success("拓扑网络构建完毕")
-    wait_for_nodes_synced(nodes)
+    try:
+        wait_for_nodes_synced(nodes)
+    except WaitUntilTimeoutError as exc:
+        logger.warning(f"等待节点同步超时: {exc}")
 
     # 5. 开始运行实验
     init_tx_gen(nodes, node_config.txgen_account_count)
     logger.success("开始运行区块链系统")
-    generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=100)
-    
-    logger.info(f"Node goodput: {sample_node.rpc.test_getGoodPut()}")
     try:
-        wait_for_nodes_synced(nodes, timeout=300)
+        generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=100)
+    except Exception as exc:
+        logger.warning(f"出块过程出现异常: {exc}")
+        
+    # logger.info(f"Node goodput: {sample_node.rpc.test_getGoodPut()}")
+    try:
+        wait_for_nodes_synced(nodes, timeout=300, retry_interval=max(5, num_target_nodes/250))
         logger.success("测试完毕，准备采集日志数据")
     except WaitUntilTimeoutError as e:
         logger.warning("部分节点没有完全同步，准备采集日志数据")
@@ -124,7 +135,7 @@ if __name__ == "__main__":
     nodes_log_path = f"{log_path}/nodes"
     Path(nodes_log_path).mkdir(parents=True, exist_ok=True)
     
-    collect_logs(nodes, nodes_log_path)
+    collect_logs_v2(nodes, nodes_log_path)
     logger.info(f"日志收集完毕")
     logger.success(f"实验完毕，日志路径 {os.path.abspath(log_path)}")
 

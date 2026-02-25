@@ -281,6 +281,7 @@ def plot_metrics_by_pecentiles(log_dir: str,
     tags.reverse()
     
     paths_and_tags = [(path, tag) for tag, (path, _) in zip(tags, selected_nodes)]
+    print(paths_and_tags)
     paths_and_tags.extend(extra_paths_and_tags)
     
     return _plot_metrics_core(

@@ -91,6 +91,20 @@ fn main() -> Result<()> {
     );
     add_block_scalar_rows(&mut table, &scalars);
     add_sync_gap_rows(&mut table, &data);
+
+    use prettytable::format::{FormatBuilder, LinePosition, LineSeparator};
+    let fmt = FormatBuilder::new()
+        .column_separator('|')
+        .borders('|')
+        // 只在 Top / Title(表头后) / Bottom 加分隔线，去掉 Intern（行间）
+        .separators(
+            &[LinePosition::Top, LinePosition::Title, LinePosition::Bottom],
+            LineSeparator::new('-', '+', '+', '+'),
+        )
+        .padding(1, 1)
+        .build();
+    table.set_format(fmt);
+
     table.printstd();
     if profile_enabled {
         eprintln!(

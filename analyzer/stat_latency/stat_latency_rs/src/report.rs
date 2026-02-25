@@ -31,6 +31,7 @@ pub fn add_block_rows(table: &mut Table, row_values: &mut HashMap<String, Vec<f6
             let stats = statistics_from_vec(row_values.remove(&key).unwrap_or_default());
             table.add_row(row_from_stats(metric, stats, Some("%.2f")));
         }
+        table.add_empty_row();
     }
 
     for t in [
@@ -49,6 +50,7 @@ pub fn add_block_rows(table: &mut Table, row_values: &mut HashMap<String, Vec<f6
             let stats = statistics_from_vec(row_values.remove(&key).unwrap_or_default());
             table.add_row(row_from_stats(metric, stats, Some("%.2f")));
         }
+        table.add_empty_row();
     }
 }
 
@@ -64,6 +66,7 @@ pub fn add_custom_block_rows(
             let stats = statistics_from_vec(row_values.remove(&key).unwrap_or_default());
             table.add_row(row_from_stats(metric, stats, Some("%.2f")));
         }
+        table.add_empty_row();
     }
 }
 
@@ -87,12 +90,14 @@ pub fn add_tx_rows(
         let stats = statistics_from_vec(tx_latency_rows.remove(p).unwrap_or_default());
         table.add_row(row_from_stats(metric, stats, Some("%.2f")));
     }
+    table.add_empty_row();
 
     for p in NodePercentile::all_in_order() {
         let metric = format!("tx packed to block latency ({})", p.name());
         let stats = statistics_from_vec(tx_packed_rows.remove(p).unwrap_or_default());
         table.add_row(row_from_stats(metric, stats, Some("%.2f")));
     }
+    table.add_empty_row();
 
     table.add_row(row_from_stats(
         "min tx packed to block latency".to_string(),

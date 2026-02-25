@@ -32,14 +32,18 @@ docker run --rm --name "${CONTAINER}_collect" \
   /bin/bash -c "./collect_logs.sh"
 
 # Compress output directory into a 7z archive (max compression). Prefer '7zz' if available.
-ARCHIVE="${OUTPUT_BASE}/output${INDEX}.7z"
-if command -v 7zz >/dev/null 2>&1; then
-  7zz a -t7z -mx=9 -m0=lzma2 -ms=on "$ARCHIVE" "${OUTPUT_BASE}/output${INDEX}"
-elif command -v 7z >/dev/null 2>&1; then
-  7z a -t7z -mx=9 -m0=lzma2 -ms=on "$ARCHIVE" "${OUTPUT_BASE}/output${INDEX}"
-else
-  echo "Warning: 7z not available, skipping compression" >&2
-fi
+# ARCHIVE="${OUTPUT_BASE}/output${INDEX}.7z"
+# if command -v 7zz >/dev/null 2>&1; then
+#   7zz a -t7z -mx=9 -m0=lzma2 -ms=on "$ARCHIVE" "${OUTPUT_BASE}/output${INDEX}"
+# elif command -v 7z >/dev/null 2>&1; then
+#   7z a -t7z -mx=9 -m0=lzma2 -ms=on "$ARCHIVE" "${OUTPUT_BASE}/output${INDEX}"
+# else
+#   echo "Warning: 7z not available, skipping compression" >&2
+# fi
+
+find ${OUTPUT_BASE}/output${INDEX} -maxdepth 1 -type f -print0 | xargs -0 -P4 -I{} sh -c '7z a -t7z -mx=9 -m0=lzma2 -ms=on -bso0 -bsp0 "{}.7z" "{}" && rm -rf "{}"'
+
+
 # Remove uncompressed output to save space only if the archive was successfully created
 # if [ -s "${ARCHIVE}" ]; then
 #   rm -rf "${OUTPUT_BASE}/output${INDEX}"

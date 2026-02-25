@@ -31,11 +31,11 @@ pub fn scan_logs(log_dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
         if !entry.file_type().is_file() {
             continue;
         }
-        let path = entry.path();
-        if path.extension() == Some(OsStr::new("7z")) {
-            let parent = path.parent().unwrap_or(log_dir);
-            if !dirs_with_blocks_log.contains(parent) {
-                archives.push(path.to_path_buf());
+        if entry.file_name() == OsStr::new("blocks.log.7z") {
+            let path = entry.path().to_path_buf();
+            archives.push(path.clone());
+            if let Some(parent) = path.parent() {
+                dirs_with_blocks_log.insert(parent.to_path_buf());
             }
         }
     }
@@ -78,7 +78,7 @@ fn archive_reader(path: &Path) -> Result<sevenz_rust::SevenZReader<fs::File>> {
 }
 
 fn extract_blocks_log_from_7z(archive_path: &Path) -> Result<Vec<u8>> {
-    if let Ok(bytes) = extract_member_from_7z(archive_path, "output0/blocks.log") {
+    if let Ok(bytes) = extract_member_from_7z(archive_path, "blocks.log") {
         return Ok(bytes);
     }
 
