@@ -45,7 +45,7 @@ impl TDigestQuantileState {
             None => incoming,
         };
         if count % 1024 == 0 {
-            merged.compress(200);
+            merged.compress(2000);
         }
         self.digest = Some(merged);
 
