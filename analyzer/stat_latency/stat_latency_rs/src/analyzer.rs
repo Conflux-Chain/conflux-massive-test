@@ -1,6 +1,6 @@
+use ethereum_types::H256;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use ethereum_types::H256;
 
 use crate::model::{AnalysisData, BlockScalars, NodePercentile, TxAnalysis};
 
@@ -61,11 +61,16 @@ pub fn analyze_txs(data: &AnalysisData) -> TxAnalysis {
 
         if !tx.ready.is_empty() {
             let min_ready = tx.ready.iter().copied().fold(f32::INFINITY, f32::min) as f64;
-            result.min_tx_to_ready_pool_latency.push(min_ready - min_recv);
+            result
+                .min_tx_to_ready_pool_latency
+                .push(min_ready - min_recv);
         }
     }
 
-    println!("Removed tx count (txs have not fully propagated) {}", missing_tx);
+    println!(
+        "Removed tx count (txs have not fully propagated) {}",
+        missing_tx
+    );
     println!("Unpacked tx count {}", unpacked_tx);
     println!("Total tx count {}", data.txs.len());
     result.slowest_packed_hash = best.map(|(h, _)| h);
@@ -121,7 +126,10 @@ pub fn build_block_row_values(
 
 pub fn build_tx_rows(
     data: &AnalysisData,
-) -> (HashMap<NodePercentile, Vec<f64>>, HashMap<NodePercentile, Vec<f64>>) {
+) -> (
+    HashMap<NodePercentile, Vec<f64>>,
+    HashMap<NodePercentile, Vec<f64>>,
+) {
     let mut tx_latency_rows: HashMap<NodePercentile, Vec<f64>> = HashMap::new();
     let mut tx_packed_rows: HashMap<NodePercentile, Vec<f64>> = HashMap::new();
 
@@ -198,7 +206,10 @@ pub fn print_throughput_and_slowest(scalars: &BlockScalars, slowest_packed_hash:
         }
         false => {
             println!("Test duration is {:.2} seconds", scalars.duration as f64);
-            println!("Throughput is {}", (scalars.tx_sum as f64) / (scalars.duration as f64));
+            println!(
+                "Throughput is {}",
+                (scalars.tx_sum as f64) / (scalars.duration as f64)
+            );
         }
     }
     if let Some(h) = slowest_packed_hash {

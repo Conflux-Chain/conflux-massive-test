@@ -53,7 +53,10 @@ fn merge_host_blocks(
         if entry.referee_count == 0 && !b.referees.is_empty() {
             entry.referee_count = b.referees.len() as i64;
         }
-        let per_block = data.block_dists.entry(block_hash).or_insert_with(HashMap::new);
+        let per_block = data
+            .block_dists
+            .entry(block_hash)
+            .or_insert_with(HashMap::new);
         for (k, vs) in b.latencies {
             let agg = per_block
                 .entry(k)
@@ -186,15 +189,13 @@ pub fn load_and_merge_hosts(
         let tx = tx.clone();
         let shared_sources = Arc::clone(&shared_sources);
         let next_index = Arc::clone(&next_index);
-        handles.push(thread::spawn(move || {
-            loop {
-                let idx = next_index.fetch_add(1, Ordering::Relaxed);
-                if idx >= shared_sources.len() {
-                    break;
-                }
-                if tx.send(load_source(&shared_sources[idx])).is_err() {
-                    break;
-                }
+        handles.push(thread::spawn(move || loop {
+            let idx = next_index.fetch_add(1, Ordering::Relaxed);
+            if idx >= shared_sources.len() {
+                break;
+            }
+            if tx.send(load_source(&shared_sources[idx])).is_err() {
+                break;
             }
         }));
     }
@@ -246,11 +247,8 @@ pub fn validate_and_filter_blocks(data: &mut AnalysisData, max_blocks: Option<us
     }
 
     if let Some(n) = max_blocks {
-        let mut pairs: Vec<(H256, i64)> = data
-            .blocks
-            .iter()
-            .map(|(h, b)| (*h, b.timestamp))
-            .collect();
+        let mut pairs: Vec<(H256, i64)> =
+            data.blocks.iter().map(|(h, b)| (*h, b.timestamp)).collect();
         pairs.sort_by(|a, b| a.1.cmp(&b.1));
         if pairs.len() > n {
             let keep: std::collections::HashSet<H256> =

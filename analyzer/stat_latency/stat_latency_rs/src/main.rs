@@ -50,7 +50,10 @@ fn main() -> Result<()> {
     let t_load = Instant::now();
     load_and_merge_hosts(&args.log_path, &mut data, quantile_impl)?;
     if profile_enabled {
-        eprintln!("[profile] load_and_merge_hosts: {:.3}s", t_load.elapsed().as_secs_f64());
+        eprintln!(
+            "[profile] load_and_merge_hosts: {:.3}s",
+            t_load.elapsed().as_secs_f64()
+        );
     }
 
     if data.node_count == 0 {
@@ -66,7 +69,10 @@ fn main() -> Result<()> {
     let (mut row_values, custom_keys) = build_block_row_values(&data, &default_keys, &pivot_keys);
     let (mut tx_latency_rows, mut tx_packed_rows) = build_tx_rows(&data);
     if profile_enabled {
-        eprintln!("[profile] analyze/build rows: {:.3}s", t_analyze.elapsed().as_secs_f64());
+        eprintln!(
+            "[profile] analyze/build rows: {:.3}s",
+            t_analyze.elapsed().as_secs_f64()
+        );
     }
 
     let t_report = Instant::now();
@@ -87,7 +93,10 @@ fn main() -> Result<()> {
     add_sync_gap_rows(&mut table, &data);
     table.printstd();
     if profile_enabled {
-        eprintln!("[profile] render table/print: {:.3}s", t_report.elapsed().as_secs_f64());
+        eprintln!(
+            "[profile] render table/print: {:.3}s",
+            t_report.elapsed().as_secs_f64()
+        );
         eprintln!("[profile] total main: {:.3}s", t0.elapsed().as_secs_f64());
     }
 

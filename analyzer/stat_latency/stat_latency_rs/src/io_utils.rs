@@ -47,8 +47,8 @@ pub fn scan_logs(log_dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
 
 pub fn load_host_log_from_path(path: &Path) -> Result<HostBlocksLog> {
     let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let host: HostBlocksLog =
-        serde_json::from_slice(&data).with_context(|| format!("parse JSON from {}", path.display()))?;
+    let host: HostBlocksLog = serde_json::from_slice(&data)
+        .with_context(|| format!("parse JSON from {}", path.display()))?;
     Ok(host)
 }
 
@@ -60,8 +60,8 @@ pub fn load_host_log_from_archive(path: &Path) -> Result<HostBlocksLog> {
 }
 
 fn archive_reader(path: &Path) -> Result<sevenz_rust::SevenZReader<fs::File>> {
-    let mut file =
-        fs::File::open(path).with_context(|| format!("failed to open archive {}", path.display()))?;
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open archive {}", path.display()))?;
 
     let pos = file
         .stream_position()
