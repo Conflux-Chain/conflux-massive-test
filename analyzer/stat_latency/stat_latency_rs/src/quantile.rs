@@ -76,7 +76,7 @@ impl QuantileAgg {
     fn quantile(&self, q: f64) -> f64 {
         match &self.backend {
             QuantileBackend::Brute(state) => state.quantile(q),
-            QuantileBackend::TDigest(state) => state.quantile(q, self.count),
+            QuantileBackend::TDigest(state) => state.quantile(q),
         }
     }
 }
