@@ -196,7 +196,7 @@ if __name__ == "__main__":
     from utils.logger import configure_logger
     configure_logger()
 
-    with open("request_config.toml", "rb") as f:
+    with open(args.request_config, "rb") as f:
         data = tomllib.load(f)
         config = ProvisionConfig(**data)
         

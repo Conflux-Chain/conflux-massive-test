@@ -13,3 +13,12 @@ class AtomicCounter:
     def get(self):
         with self._lock:
             return self.value
+        
+_counters = {}
+_global_lock = threading.Lock()
+
+def get_global_counter(key: str):
+    with _global_lock:
+        if key not in _counters:
+            _counters[key] = AtomicCounter()
+        return _counters[key]

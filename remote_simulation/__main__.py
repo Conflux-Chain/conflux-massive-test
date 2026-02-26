@@ -51,6 +51,12 @@ def make_parser():
         default=f"logs/{generate_timestamp()}",
         help="日志存储路径 (默认: logs/YYYYMMDDHHMMSS)"
     )
+    parser.add_argument(
+        "-b", "--num-blocks",
+        type=int,
+        default=2000,
+        help="实验区块数量"
+    )
     return parser
 
 
@@ -80,10 +86,10 @@ if __name__ == "__main__":
 
     # 2. 生成配置
     num_target_nodes = sum([s.nodes_per_host for s in host_specs])
-    connect_peers = min(7, num_target_nodes - 1)
+    connect_peers = min(8, num_target_nodes - 1)
 
-    simulation_config = SimulateOptions(target_nodes=num_target_nodes, num_blocks=2000, connect_peers=connect_peers, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
-    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = min(100, 100_000 // num_target_nodes))
+    simulation_config = SimulateOptions(target_nodes=num_target_nodes, num_blocks=args.num_blocks, connect_peers=connect_peers, target_tps=17000, storage_memory_gb=16, generation_period_ms=175)
+    node_config = ConfluxOptions(send_tx_period_ms=200, tx_pool_size=2_000_000, target_block_gas_limit=120_000_000, max_block_size_in_bytes=450*1024, txgen_account_count = min(100, 100_000 // num_target_nodes), max_outgoing_peers = 10 * connect_peers)
     assert node_config.txgen_account_count * simulation_config.target_nodes <= 100_000
 
     config_file = generate_config_file(simulation_config, node_config)
@@ -107,25 +113,31 @@ if __name__ == "__main__":
     topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers, latency_max = 0)
     for k, v in topology.peers.items():
         logger.debug(f"Node {nodes[k].id}({k}) has {len(v)} peers: {", ".join([str(i) for i in v])}")
-    connect_nodes(nodes, topology, min_peers=simulation_config.connect_peers - 2)
+    logger.success("拓扑网络方案构建完成")
+    nodes = connect_nodes(nodes, topology, min_peers=simulation_config.connect_peers - 2, max_workers = 1000)
     logger.success("拓扑网络构建完毕")
     try:
-        wait_for_nodes_synced(nodes)
+        wait_for_nodes_synced(nodes, max_workers = 2000)
     except WaitUntilTimeoutError as exc:
         logger.warning(f"等待节点同步超时: {exc}")
 
     # 5. 开始运行实验
     init_tx_gen(nodes, node_config.txgen_account_count)
     logger.success("开始运行区块链系统")
+    success_complete = False
     try:
         generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=100)
+        success_complete = True
     except Exception as exc:
         logger.warning(f"出块过程出现异常: {exc}")
         
     # logger.info(f"Node goodput: {sample_node.rpc.test_getGoodPut()}")
     try:
-        wait_for_nodes_synced(nodes, timeout=300, retry_interval=max(5, num_target_nodes/250))
-        logger.success("测试完毕，准备采集日志数据")
+        if success_complete:
+            wait_for_nodes_synced(nodes, max_workers = 2000, timeout=300, retry_interval=max(5, num_target_nodes/250))
+            logger.success("测试完毕，准备采集日志数据")
+        else:
+            logger.warning("测试中断，准备采集日志数据")    
     except WaitUntilTimeoutError as e:
         logger.warning("部分节点没有完全同步，准备采集日志数据")
     

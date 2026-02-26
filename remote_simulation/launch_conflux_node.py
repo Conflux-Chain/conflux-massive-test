@@ -6,7 +6,7 @@ from . import docker_cmds
 from .remote_node import RemoteNode
 from utils import shell_cmds
 from remote_simulation.port_allocation import remote_rpc_port
-from utils.counter import AtomicCounter
+from utils.counter import AtomicCounter, get_global_counter
 from utils.tempfile import TempFile
 from itertools import chain
 
@@ -21,21 +21,22 @@ import requests
 from loguru import logger
 
 
-HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=400)
-NODE_CONNECT_POOL = ThreadPoolExecutor(max_workers=400)
+HOST_CONNECT_POOL = ThreadPoolExecutor(max_workers=2000)
+NODE_CONNECT_POOL = ThreadPoolExecutor(max_workers=2000)
 
 @dataclass
 class InstanceExecutionContext:
     counter: AtomicCounter
     config_file: TempFile
     pull_docker_image: bool
+    clear_environment: bool
 
 
-def launch_remote_nodes(host_specs: List[HostSpec], config_file: TempFile, pull_docker_image: bool = True) -> List[RemoteNode]:
+def launch_remote_nodes(host_specs: List[HostSpec], config_file: TempFile, *, pull_docker_image: bool = True, clear_environment: bool = False) -> List[RemoteNode]:
     logger.info("开始启动所有 Conflux 节点")
 
     counter = AtomicCounter()
-    context = InstanceExecutionContext(counter=counter, config_file=config_file, pull_docker_image=pull_docker_image)
+    context = InstanceExecutionContext(counter=counter, config_file=config_file, pull_docker_image=pull_docker_image, clear_environment=clear_environment)
 
     launch_instance_future = HOST_CONNECT_POOL.map(lambda spec: _execute_instance(spec, context), host_specs)
 
@@ -87,19 +88,20 @@ def _execute_instance(host_spec: HostSpec, ctx: InstanceExecutionContext) -> Lis
         user = host_spec.ssh_user
 
         shell_cmds.scp("./scripts/setup_image.sh", ip_address, user, "~/setup_image.sh")
-        logger.debug(f"实例 {ip_address} 上传初始化脚本完成")
+        # logger.debug(f"实例 {ip_address} 上传初始化脚本完成")
         shell_cmds.ssh(ip_address, user, "~/setup_image.sh")
-        logger.debug(f"实例 {ip_address} 初始化完成")
+        # logger.debug(f"实例 {ip_address} 初始化完成")
         shell_cmds.scp(ctx.config_file.path, ip_address, user, "~/config.toml")
-
-        logger.debug(f"实例 {ip_address} 同步配置完成")
+        # logger.debug(f"实例 {ip_address} 同步配置完成 ")
         if ctx.pull_docker_image:
             shell_cmds.ssh(ip_address, user, docker_cmds.pull_image())
             logger.debug(f"实例 {ip_address} 拉取 docker 镜像完成")
 
         # 清理之前实验的残留数据        
-        shell_cmds.ssh(ip_address, user, docker_cmds.destory_all_nodes())
-        logger.debug(f"实例 {ip_address} 状态初始化完成，开始启动节点")
+        if ctx.clear_environment:
+            shell_cmds.ssh(ip_address, user, docker_cmds.destory_all_nodes())
+        
+        logger.debug(f"实例 {ip_address} 状态初始化完成，开始启动节点 ({get_global_counter("execute_5").increment()})")
     except Exception as e:
         logger.warning(f"无法初始化实例 {ip_address}: {e}")
         return list()
@@ -132,7 +134,7 @@ def _launch_node(host_spec: HostSpec, index: int, counter: AtomicCounter):
         return None
 
     cnt = counter.increment()
-    logger.info(f"节点 {node.id} 启动成功，节点累计 {cnt}")
+    logger.info(f"节点 {node.desc} 启动成功，节点累计 {cnt}")
     return node
         
 
