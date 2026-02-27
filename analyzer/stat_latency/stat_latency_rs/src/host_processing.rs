@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use ethereum_types::H256;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -160,7 +161,7 @@ pub fn load_and_merge_hosts(
         .map(|n| n.get())
         .unwrap_or(4)
         .max(1)
-        .min(8)
+        .min(16)
         .min(total_hosts.max(1));
     if let Ok(override_workers) = std::env::var("STAT_LATENCY_WORKERS") {
         if let Ok(n) = override_workers.parse::<usize>() {
@@ -212,6 +213,13 @@ pub fn load_and_merge_hosts(
             break;
         }
     }
+
+    data.block_dists
+        .values_mut()
+        .map(HashMap::values_mut)
+        .flatten()
+        .par_bridge()
+        .for_each(QuantileAgg::finalize);
 
     for handle in handles {
         let _ = handle.join();

@@ -50,8 +50,15 @@ impl QuantileAgg {
         self.max = self.max.max(x);
         match &mut self.backend {
             QuantileBackend::Brute(state) => state.insert(x),
-            QuantileBackend::TDigest(state) => state.insert(x, self.count),
+            QuantileBackend::TDigest(state) => state.insert(x),
         }
+    }
+
+    pub fn finalize(&mut self) {
+        let QuantileBackend::TDigest(state) = &mut self.backend else {
+            return;
+        };
+        state.merge();
     }
 
     pub fn value_for(&self, p: NodePercentile) -> f64 {
