@@ -2,6 +2,9 @@
 
 ulimit -n 65536
 
+REQUEST_CONFIG_PATH=${1:-request_config.toml}
+TEST_NUM_BLOCKS=${2:-2000}
+
 # 加载 .env 文件
 if [ -f .env ]; then
     set -a  # 自动导出所有变量
@@ -54,12 +57,12 @@ mkdir -p $LOG_PATH
 
 # --- 步骤 1: 创建实例 ---
 print_separator "步骤 1/3: 创建云服务实例..."
-$PYTHON -m cloud_provisioner.create_instances
-cp request_config.toml $LOG_PATH
+$PYTHON -m cloud_provisioner.create_instances -c $REQUEST_CONFIG_PATH
+cp $REQUEST_CONFIG_PATH $LOG_PATH/request_config.toml
 
 # --- 步骤 2: 远程模拟 ---
 print_separator "步骤 2/3: 开始远程模拟..."
-$PYTHON -m remote_simulation -l $LOG_PATH
+$PYTHON -m remote_simulation -l $LOG_PATH -b $TEST_NUM_BLOCKS
 
 # --- 如果远程模拟成功退出，手动触发清理，并且关闭 trap ---
 cleanup

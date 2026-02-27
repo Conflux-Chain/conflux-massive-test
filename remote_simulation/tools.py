@@ -35,15 +35,15 @@ def check_nodes_synced(executor: ThreadPoolExecutor, nodes: List[RemoteNode]):
     block_to_nodes = defaultdict(list)
     for node, block_hash in zip(nodes, best_blocks):
         if block_hash is not None:
-            block_to_nodes[block_hash].append(node.id)
+            block_to_nodes[block_hash].append(node)
     
     # 找出 cnt <= 5 的 block hash 及其对应的节点 id
-    rare_blocks_info = [(block_hash, len(node_ids), node_ids) for block_hash, node_ids in block_to_nodes.items() if len(node_ids) <= 5]
+    rare_blocks_info = [(block_hash, len(nodes), nodes) for block_hash, nodes in block_to_nodes.items() if len(nodes) <= 5]
     
     if len(rare_blocks_info) > 0:
         logger.debug("出现次数不超过5的区块及其节点:")
-        for (block_hash, cnt, node_ids) in rare_blocks_info:
-            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {",".join(node_ids)}")
+        for (block_hash, cnt, nodes) in rare_blocks_info:
+            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {",".join([f"{node.id}({node.host_spec.provider}/{node.host_spec.zone})" for node in nodes])}")
     
     most_common = Counter(best_blocks).most_common(1)
     if not most_common:
@@ -143,14 +143,14 @@ def collect_logs_v2(nodes: List[RemoteNode], local_path: str) -> None:
             logger.warning(f"节点 {node.id} 日志同步遇到问题: {exc}")
             return 1
 
-    with ThreadPoolExecutor(max_workers=400) as gen_executor:
+    with ThreadPoolExecutor(max_workers=2000) as gen_executor:
         gen_results = list(gen_executor.map(_generate, nodes))
 
     gen_success_nodes = [n for n, ok in gen_results if ok]
     gen_success_cnt = len(gen_success_nodes)
     logger.info(f"日志生成阶段完成: 成功 {gen_success_cnt}/{total_cnt}，准备开始同步阶段")
 
-    with ThreadPoolExecutor(max_workers=32) as sync_executor:
+    with ThreadPoolExecutor(max_workers=64) as sync_executor:
         sync_results = list(sync_executor.map(_sync, gen_success_nodes))
 
     sync_failures = sum(sync_results)

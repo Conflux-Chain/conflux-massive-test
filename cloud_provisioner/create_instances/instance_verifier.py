@@ -11,6 +11,7 @@ from loguru import logger
 
 from ..provider_interface import IEcsClient
 from .types import Instance, InstanceType
+from utils.counter import get_global_counter
 from utils.wait_until import WaitUntilTimeoutError, wait_until
 
 SSH_CHECK_POOL = ThreadPoolExecutor(max_workers=2000)
@@ -131,8 +132,12 @@ class InstanceVerifier:
         while self.is_running():
             # 从队列获取任务并提交
             try:
+                # FIXME: 
+                # 1. 10000 个节点启动时，CPU 是瓶颈，具体原因不明
+                # 2. SSH_CHECK_POOL 满导致 SSH_CHECK_POOL.submit 阻塞时，可能有 deadlock
                 running_instances = self._running_queue.get_nowait()
                 for instance_id, (public_ip, private_ip) in running_instances.items():
+                    # FIXME: 此处有 deadlock 风险，
                     check_future = SSH_CHECK_POOL.submit(
                         _wait_for_ssh_port_ready, public_ip)
                     future_set[instance_id] = (public_ip, private_ip, check_future)
@@ -150,7 +155,7 @@ class InstanceVerifier:
 
                 if is_success:
                     logger.info(
-                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect success")
+                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect success ({get_global_counter("ssh_check").increment()})")
 
                     with self._lock:
                         instance = self.pending_instances[instance_id]

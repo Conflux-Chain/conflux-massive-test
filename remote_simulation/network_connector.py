@@ -6,6 +6,7 @@ from loguru import logger
 from remote_simulation.network_topology import NetworkTopology
 from remote_simulation.remote_node import RemoteNode
 from utils.wait_until import wait_until
+from utils.counter import get_global_counter
 
 
 def connect_nodes(nodes: List[RemoteNode],
@@ -46,7 +47,7 @@ class NetworkConnector:
     def _connect_topology(
         self,
         min_peers: int = 3
-    ) -> None:
+    ) -> List[RemoteNode]:
         """
         根据拓扑结构建立网络连接
 
@@ -67,8 +68,12 @@ class NetworkConnector:
         # 第三步：清理资源
         executor.shutdown(wait=True)
 
-        if len(failed_nodes) > 0:
-            raise Exception("部分节点建立连接失败")
+        if len(failed_nodes) > 10:
+            raise Exception("过多节点建立连接失败")
+        
+        failed_nodes = set(failed_nodes)
+
+        return [node for idx, node in enumerate(self.nodes) if idx not in failed_nodes]
 
     def _submit_connection_tasks(
         self,
@@ -121,14 +126,15 @@ class NetworkConnector:
 
             # 等待连接稳定
             if len(valid_peers) < min_peers:
-                logger.warning(f"Node {node.id} build p2p connection error: not enough peers {len(valid_peers)} < {min_peers}")
+                logger.warning(f"Node {node.desc} build p2p connection error: not enough peers {len(valid_peers)} < {min_peers}")
                 return False
 
+            logger.debug(f"Node {node.id} build p2p connection success ({get_global_counter("build_p2p").increment()})")
             return True
 
         except Exception as e:
             logger.warning(
-                f"Node {node.id} build p2p connection error: {e}")
+                f"Node {node.desc} build p2p connection error: {e}")
             return False
 
     def _collect_results(

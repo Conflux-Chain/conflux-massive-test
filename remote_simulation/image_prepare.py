@@ -9,6 +9,7 @@ from loguru import logger
 from cloud_provisioner.host_spec import HostSpec
 from remote_simulation import docker_cmds
 from utils import shell_cmds
+from utils.counter import get_global_counter
 
 
 def _sorted_hosts_by_private_ip(hosts: List[HostSpec]) -> List[HostSpec]:
@@ -85,13 +86,13 @@ def prepare_host_images(
         _sync_prepare_scripts(host, dockerhub_script, registry_script)
 
         if index == 0:
-            logger.debug(f"zone {host.zone}: seed {host_ip} pulls from dockerhub")
+            logger.debug(f"zone {host.zone}: seed {host_ip} pulls from dockerhub ({get_global_counter("pull_docker").increment()})")
             shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image_from_dockerhub_and_push_local())
             return True
 
         registry_host = _nearest_ready_ancestor(index, ordered, futures)
         if registry_host is not None:
-            logger.debug(f"zone {host.zone}: {host_ip} pulls from {registry_host}")
+            logger.debug(f"zone {host.zone}: {host_ip} pulls from {registry_host} ({get_global_counter("pull_docker").increment()})")
             try:
                 shell_cmds.ssh(
                     host.ip,
