@@ -4,6 +4,7 @@
 This script reads an inventory (by default `hosts.json`), launches nodes, runs the experiment, and collects logs.
 """
 import os
+import argparse
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
@@ -161,6 +162,10 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run a Conflux simulation on provisioned cloud instances")
+    parser.add_argument("--log-prefix", default="logs", help="Base directory prefix for logs")
+    args = parser.parse_args()
+
     root = Path(__file__).resolve().parent
     servers_json = root / "hosts.json"
 
@@ -205,7 +210,7 @@ if __name__ == "__main__":
     config_file = generate_config_file(simulation_config, node_config)
     logger.success(f"完成配置文件 {config_file.path}")
 
-    log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+    log_path = f"{args.log_prefix}/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     logger.info("准备分区内镜像拉取 (dockerhub -> zone peers -> local registry)")
