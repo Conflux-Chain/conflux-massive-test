@@ -136,8 +136,8 @@ def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
         try:
             local_node_path = str(Path(local_path) / node.id)
             Path(local_node_path).mkdir(parents=True, exist_ok=True)
-            remote_archive = f"{_archive_base(node.host_spec)}/output{node.index}.7z"
-            shell_cmds.rsync_download(remote_archive, local_node_path, node.host_spec.ip, user=node.host_spec.ssh_user)
+            remote_output_dir = f"{_archive_base(node.host_spec)}/output{node.index}/"
+            shell_cmds.rsync_download(remote_output_dir, local_node_path, node.host_spec.ip, user=node.host_spec.ssh_user)
             cnt2 = counter2.increment()
             logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
             return 0
