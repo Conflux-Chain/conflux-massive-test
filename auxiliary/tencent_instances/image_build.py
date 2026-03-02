@@ -9,16 +9,18 @@ import asyncssh
 from loguru import logger
 from dotenv import load_dotenv
 from tencentcloud.cvm.v20170312 import models as cvm_models
+from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 
 from utils.wait_until import wait_until
 from cloud_provisioner.create_instances.instance_verifier import _check_port
 from cloud_provisioner.tencent_provider.client_factory import TencentClient
-from cloud_provisioner.tencent_provider.instance import delete_instances, describe_instance_status
+from cloud_provisioner.tencent_provider.instance import delete_instances
 
 
 DEFAULT_IMAGE_NAME = "conflux-docker-registry"
 FIXED_REGION = "ap-singapore"
-BUILDER_INSTANCE_TYPE = "S5.MEDIUM2"
+# Must use a powerful builder to ensure disk performance!
+BUILDER_INSTANCE_TYPE = "SA5.2XLARGE32"
 TEST_INSTANCE_TYPE = "S5.LARGE2"
 TEST_INSTANCES = 2
 DISK_GB = 20
@@ -107,6 +109,14 @@ def pick_zone(client: TencentClient, region: str) -> str:
     if not zones:
         raise RuntimeError(f"no zones found in region {region}")
     return zones[0]
+
+
+def list_zones(client: TencentClient, region: str) -> Sequence[str]:
+    from cloud_provisioner.tencent_provider.zone import get_zone_ids_in_region
+    zones = get_zone_ids_in_region(client.build_cvm(region))
+    if not zones:
+        raise RuntimeError(f"no zones found in region {region}")
+    return zones
 
 
 def wait_img(c, image_id: str, poll: int, timeout: int) -> None:
@@ -198,7 +208,7 @@ def start_builder_instance(client: TencentClient, cfg: CvmRuntimeConfig, zone_id
         placement.Zone = zone_id
         req.Placement = placement
         system_disk = cvm_models.SystemDisk()
-        system_disk.DiskType = "CLOUD_SSD"
+        system_disk.DiskType = "CLOUD_HSSD"  # Must use high-performance disk for builder!
         system_disk.DiskSize = DISK_GB
         req.SystemDisk = system_disk
         
@@ -272,12 +282,27 @@ def create_server_image(
         wait_img(c, existing, cfg.poll_interval, cfg.wait_timeout)
         return existing
 
-    zone = cfg.zone_id or pick_zone(client, cfg.region_id)
+    zone_candidates = [cfg.zone_id] if cfg.zone_id else list(list_zones(client, cfg.region_id))
     instance_id = ""
     temp_key_path = None
     try:
         logger.info(f"using instance type: {BUILDER_INSTANCE_TYPE}")
-        instance_id = start_builder_instance(client, cfg, zone, base_image_id, BUILDER_INSTANCE_TYPE)
+        last_error: Optional[Exception] = None
+        for zone in zone_candidates:
+            try:
+                logger.info(f"trying builder zone: {zone}")
+                instance_id = start_builder_instance(client, cfg, zone, base_image_id, BUILDER_INSTANCE_TYPE)
+                break
+            except TencentCloudSDKException as exc:
+                if exc.code in {"ResourceInsufficient.SpecifiedInstanceType", "ResourceInsufficient.InsufficientOfferingMinimum"}:
+                    logger.warning(f"zone {zone} has insufficient stock for {BUILDER_INSTANCE_TYPE}, trying next zone")
+                    last_error = exc
+                    continue
+                raise
+        if not instance_id:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(f"failed to create builder in zones: {zone_candidates}")
         temp_key_path = cfg.ssh_private_key_path
         logger.info(f"builder: {instance_id}")
         ip = ""

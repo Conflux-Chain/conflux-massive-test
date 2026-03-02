@@ -157,5 +157,13 @@ name = "SA5.2XLARGE32"
 nodes = 1
 
 [[tencent.instance_types]]
-name = "S3.2XLARGE32"
+name = "S6.2XLARGE32"
+nodes = 1
+
+[[tencent.instance_types]]
+name = "SA4.2XLARGE32"
+nodes = 1
+
+[[tencent.instance_types]]
+name = "S8.2XLARGE32"
 nodes = 1
