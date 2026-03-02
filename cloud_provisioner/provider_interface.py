@@ -72,3 +72,7 @@ class IEcsClient(ABC):
     @abstractmethod
     def create_vpc(self, region_id: str, vpc_name: str, cidr_block: str) -> str:
         ...
+
+    @abstractmethod
+    def delete_vpc(self, region_id: str, vpc_id: str):
+        ...

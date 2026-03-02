@@ -80,3 +80,65 @@ def create_vpc(client: EC2Client, vpc_name: str, cidr_block: str):
     
     return vpc_id
 
+
+from loguru import logger
+
+
+def delete_vpc(client: EC2Client, vpc_id: str):
+    logger.info(f"Starting dependency cleanup for VPC {vpc_id}")
+
+    # Detach and delete internet gateways
+    logger.debug("Listing internet gateways attached to VPC")
+    igw_resp = client.describe_internet_gateways(Filters=[{'Name': 'attachment.vpc-id', 'Values': [vpc_id]}])
+    for igw in igw_resp.get('InternetGateways', []):
+        igw_id = igw['InternetGatewayId']
+        logger.info(f"Detaching IGW {igw_id} from VPC {vpc_id}")
+        client.detach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+        logger.info(f"Deleting IGW {igw_id}")
+        client.delete_internet_gateway(InternetGatewayId=igw_id)
+
+    # Delete subnets
+    logger.debug("Listing subnets in VPC")
+    response = client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}], MaxResults=1000)
+    for subnet in response.get('Subnets', []):
+        subnet_id = subnet['SubnetId']
+        logger.info(f"Deleting subnet {subnet_id} in VPC {vpc_id}")
+        client.delete_subnet(SubnetId=subnet_id)
+
+    # Disassociate and delete route tables
+    logger.debug("Listing route tables in VPC")
+    rts = client.describe_route_tables(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+    for rt in rts.get('RouteTables', []):
+        rt_id = rt['RouteTableId']
+        logger.debug(f"Processing route table {rt_id}")
+        for assoc in rt.get('Associations', []):
+            if not assoc.get('Main'):
+                assoc_id = assoc['RouteTableAssociationId']
+                logger.info(f"Disassociating route table association {assoc_id}")
+                client.disassociate_route_table(AssociationId=assoc_id)
+        logger.info(f"Deleting route table {rt_id}")
+        client.delete_route_table(RouteTableId=rt_id)
+
+    # Delete network interfaces
+    logger.debug("Listing network interfaces in VPC")
+    nis = client.describe_network_interfaces(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+    for ni in nis.get('NetworkInterfaces', []):
+        ni_id = ni['NetworkInterfaceId']
+        logger.info(f"Detaching and deleting network interface {ni_id}")
+        if 'Attachment' in ni and 'AttachmentId' in ni['Attachment']:
+            client.detach_network_interface(AttachmentId=ni['Attachment']['AttachmentId'], Force=True)
+        client.delete_network_interface(NetworkInterfaceId=ni_id)
+
+    # Delete security groups (skip default)
+    logger.debug("Listing security groups in VPC")
+    sgs = client.describe_security_groups(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
+    for sg in sgs.get('SecurityGroups', []):
+        if sg.get('GroupName') != 'default':
+            sg_id = sg['GroupId']
+            logger.info(f"Deleting security group {sg_id}")
+            client.delete_security_group(GroupId=sg_id)
+
+    # Final attempt to delete VPC
+    logger.info(f"Deleting VPC {vpc_id}")
+    client.delete_vpc(VpcId=vpc_id)
+
