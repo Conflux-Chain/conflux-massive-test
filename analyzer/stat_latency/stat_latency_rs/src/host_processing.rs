@@ -74,7 +74,7 @@ fn merge_host_txs(data: &mut AnalysisData, host_txs: HashMap<H256, crate::model:
         let tx_entry = data.txs.entry(tx_hash).or_insert_with(TxAgg::default);
         let mut local_received_min: Option<f64> = None;
         for ts in tx.received_timestamps {
-            tx_entry.received.push(ts as f32);
+            tx_entry.received.push(ts);
             local_received_min = Some(match local_received_min {
                 None => ts,
                 Some(cur) => cur.min(ts),
@@ -84,7 +84,7 @@ fn merge_host_txs(data: &mut AnalysisData, host_txs: HashMap<H256, crate::model:
         let mut first_packed: Option<f64> = None;
         for ts in tx.packed_timestamps {
             if let Some(t) = ts {
-                tx_entry.packed.push(t as f32);
+                tx_entry.packed.push(t);
                 if first_packed.is_none() {
                     first_packed = Some(t);
                 }
@@ -93,7 +93,7 @@ fn merge_host_txs(data: &mut AnalysisData, host_txs: HashMap<H256, crate::model:
 
         for ts in tx.ready_pool_timestamps {
             if let Some(t) = ts {
-                tx_entry.ready.push(t as f32);
+                tx_entry.ready.push(t);
             }
         }
 

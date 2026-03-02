@@ -37,8 +37,18 @@ pub fn statistics_from_sorted(data: &[f64]) -> Statistics {
     let sum: f64 = data.iter().sum();
     let avg = (sum / (cnt as f64) * 100.0).round() / 100.0;
     let pick = |q: f64| -> f64 {
-        let idx = ((cnt - 1) as f64 * q) as usize;
-        data[idx.min(cnt - 1)]
+        if cnt == 1 {
+            return data[0];
+        }
+        let q = q.clamp(0.0, 1.0);
+        let h = (cnt - 1) as f64 * q;
+        let lo = h.floor() as usize;
+        let hi = h.ceil() as usize;
+        if lo == hi {
+            return data[lo];
+        }
+        let w = h - (lo as f64);
+        data[lo] + (data[hi] - data[lo]) * w
     };
 
     Statistics {

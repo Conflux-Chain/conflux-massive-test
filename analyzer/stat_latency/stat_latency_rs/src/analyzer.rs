@@ -6,8 +6,18 @@ use crate::model::{AnalysisData, BlockScalars, NodePercentile, TxAnalysis};
 
 fn collect_tx_node_percentiles(latencies: &[f64]) -> HashMap<NodePercentile, f64> {
     let pick = |q: f64| -> f64 {
-        let idx = ((latencies.len() - 1) as f64 * q) as usize;
-        latencies[idx.min(latencies.len() - 1)]
+        if latencies.len() == 1 {
+            return latencies[0];
+        }
+        let q = q.clamp(0.0, 1.0);
+        let h = (latencies.len() - 1) as f64 * q;
+        let lo = h.floor() as usize;
+        let hi = h.ceil() as usize;
+        if lo == hi {
+            return latencies[lo];
+        }
+        let w = h - (lo as f64);
+        latencies[lo] + (latencies[hi] - latencies[lo]) * w
     };
     let sum: f64 = latencies.iter().sum();
     let avg = (sum / (latencies.len() as f64) * 100.0).round() / 100.0;
@@ -25,8 +35,8 @@ fn collect_tx_node_percentiles(latencies: &[f64]) -> HashMap<NodePercentile, f64
     out
 }
 
-fn min_recv_and_latency(values: &[f32], baseline: f64) -> Vec<f64> {
-    let mut latencies: Vec<f64> = values.iter().map(|t| (*t as f64) - baseline).collect();
+fn min_recv_and_latency(values: &[f64], baseline: f64) -> Vec<f64> {
+    let mut latencies: Vec<f64> = values.iter().map(|t| *t - baseline).collect();
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     latencies
 }
@@ -48,8 +58,8 @@ pub fn analyze_txs(data: &AnalysisData) -> TxAnalysis {
             continue;
         }
 
-        let min_recv = tx.received.iter().copied().fold(f32::INFINITY, f32::min) as f64;
-        let min_packed = tx.packed.iter().copied().fold(f32::INFINITY, f32::min) as f64;
+        let min_recv = tx.received.iter().copied().fold(f64::INFINITY, f64::min);
+        let min_packed = tx.packed.iter().copied().fold(f64::INFINITY, f64::min);
         let latency = min_packed - min_recv;
         result.min_tx_packed_to_block_latency.push(latency);
 
@@ -60,7 +70,7 @@ pub fn analyze_txs(data: &AnalysisData) -> TxAnalysis {
         }
 
         if !tx.ready.is_empty() {
-            let min_ready = tx.ready.iter().copied().fold(f32::INFINITY, f32::min) as f64;
+            let min_ready = tx.ready.iter().copied().fold(f64::INFINITY, f64::min);
             result
                 .min_tx_to_ready_pool_latency
                 .push(min_ready - min_recv);
@@ -135,7 +145,7 @@ pub fn build_tx_rows(
 
     for tx in data.txs.values() {
         if tx.received.len() == data.node_count {
-            let min_recv = tx.received.iter().copied().fold(f32::INFINITY, f32::min) as f64;
+            let min_recv = tx.received.iter().copied().fold(f64::INFINITY, f64::min);
             let latencies = min_recv_and_latency(&tx.received, min_recv);
             let per = collect_tx_node_percentiles(&latencies);
             for p in NodePercentile::all_in_order() {
@@ -147,7 +157,7 @@ pub fn build_tx_rows(
         }
 
         if !tx.packed.is_empty() {
-            let min_recv = tx.received.iter().copied().fold(f32::INFINITY, f32::min) as f64;
+            let min_recv = tx.received.iter().copied().fold(f64::INFINITY, f64::min);
             let latencies = min_recv_and_latency(&tx.packed, min_recv);
             let per = collect_tx_node_percentiles(&latencies);
             for p in NodePercentile::all_in_order() {
