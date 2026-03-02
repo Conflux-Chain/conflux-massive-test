@@ -140,9 +140,9 @@ pub struct BlockInfo {
 
 #[derive(Debug, Default)]
 pub struct TxAgg {
-    pub received: Vec<f32>,
-    pub packed: Vec<f32>,
-    pub ready: Vec<f32>,
+    pub received: Vec<f64>,
+    pub packed: Vec<f64>,
+    pub ready: Vec<f64>,
 }
 
 #[derive(Debug, Default)]
