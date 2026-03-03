@@ -14,9 +14,15 @@ The module has two output paths. The main path is figure generation from `__main
 
 This section defines the terms and mechanisms referenced throughout later sections.
 
-### 2.1 Metric naming: `module::key`
+### 2.1 Metric naming: `module::key.stat`
 
-Each metric is identified by a two-part name: a **module** (the Conflux subsystem that emits it, matching `[0-9a-z_]+`) and a **key** (the specific measurement within that module). The fully qualified form is `module::key`. A bare `key` can be used only when it is unique across all modules; otherwise an ambiguity error is raised. For automation and reproducibility, always use `module::key`.
+Metrics actually use a **three-level name**: `module::key.stat`.
+
+- **module** is the Conflux subsystem that emits the metric (matching `[0-9a-z_]+`).
+- **key** is the specific measurement within that module.
+- **stat** is a suffix indicating the statistical view of the same base metric. Typical stats include `.m1` (1‑minute moving average), `.m5` (5‑minute moving average), `.mean`, `.p90`, etc.
+
+The fully qualified form is `module::key.stat`. A bare `key` is acceptable only when it is unique across all modules; otherwise an ambiguity error is raised.
 
 ### 2.2 Two-layer percentile node selection
 
@@ -32,7 +38,12 @@ Consequently, `P0` in a plot legend means "the node whose representative value i
 
 Before plotting or computing statistics, the preprocessing step generates a derived metric for every original metric whose key ends in `.count`. The derived key is `<original>.m1`, and the derived value is a time-decay weighted average of the count increments — effectively a smoothed short-horizon rate or throughput signal, as opposed to the raw cumulative counter `.count`.
 
-The computation proceeds in three steps.
+Why derivation is necessary:
+
+- In the Conflux-Rust codebase, **Counter**-typed metrics only emit the `.count` field and do not provide an `.m1`. The Python script therefore derives `.m1` for counters.
+- **Meter**-typed metrics already include a native `.m1` field, but they also have a `.count` field. Because the script does not distinguish Counter versus Meter at parse time, it will still derive a `.count.m1` for Meter metrics; this derived value has no semantic meaning (it duplicates the native `.m1`) but causes no harm.
+
+The computation of `.m1` itself proceeds in three steps.
 
 1. Build an increment series: `diff[i] = value[i] - value[i-1]`, with the first point unchanged.
 2. Build exponential-decay weights from elapsed time between consecutive samples (minute scale).

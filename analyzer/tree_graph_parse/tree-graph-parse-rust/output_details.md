@@ -48,8 +48,9 @@ A lower `time_offset` at a given risk threshold means faster confirmation. A lar
 
 ### 2.7 Sequential search (threshold scan)
 
-When computing `confirmation_risk(block, adv_percent, risk_threshold)`, the code scans increasing `time_offset` values and evaluates the combined risk at each step. This **sequential search** stops at the first `time_offset` where risk drops below the specified threshold. To avoid numerical degeneracy, risk values are floored at approximately `1e-12` before comparison.
+When computing `confirmation_risk(block, adv_percent, risk_threshold)`, the code scans increasing `time_offset` values and evaluates the combined risk at each step. This **sequential search** stops at the first `time_offset` where risk drops below the specified threshold.
 
+The code needs to build a risk time series for every block-arrival event. Probabilities below `1e-12` have no practical distinction, so the implementation simply truncates values under that floor to `1e-12` to save memory storage.
 ---
 
 ## 3. Input and loading behavior

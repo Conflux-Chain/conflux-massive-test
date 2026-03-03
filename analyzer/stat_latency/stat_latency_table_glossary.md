@@ -140,11 +140,3 @@ Rows are `node sync/cons gap (Avg)`, `node sync/cons gap (P50)`, `node sync/cons
 For each node, the underlying sampled quantity is `inserted_header_count(sync_graph) - inserted_block_count(consensus_graph)` — measuring the backlog between the sync graph and the consensus graph (Section 1). The table then aggregates those per-node statistics across nodes. This family is a **count** metric representing processing lag, not a time metric.
 
 ---
-
-## 4) Practical interpretation tips
-
-- Compare `Receive` vs `Sync` vs `Cons` tails (`P95/P99/Max`) to localize which stage in the block pipeline (Section 1) is the bottleneck.
-- Large `SyncGraph` or `ConsensusGraphStart` tails suggest pipeline contention between the sync graph and consensus graph (Section 1).
-- Large `ComputeEpoch`/`Compute*` tails indicate execution or epoch-compute pressure.
-- High `by_block_ratio` means tx propagation is relying more on block transport.
-- `CmptRecoverRate` is gauge semantics; treat it as a health/pressure indicator, not elapsed seconds unless emitter docs confirm unit.

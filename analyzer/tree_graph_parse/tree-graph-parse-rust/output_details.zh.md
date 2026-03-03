@@ -48,7 +48,9 @@ Conflux 区块构成有向无环图（DAG）。每个区块有且仅有一条 **
 
 ### 2.7 序列搜索（阈值扫描）
 
-调用 `confirmation_risk(block, adv_percent, risk_threshold)` 时，代码从小到大扫描递增的 `time_offset` 值，在每一步计算综合风险。这一过程称为**序列搜索**（sequential search），在风险首次低于指定阈值时停止。为了避免数值退化，风险值在比较前会被设置下界（约 `1e-12`），确保不会退化为精确的 0。
+调用 `confirmation_risk(block, adv_percent, risk_threshold)` 时，代码从小到大扫描递增的 `time_offset` 值，在每一步计算综合风险。这一过程称为**序列搜索**（sequential search），在风险首次低于指定阈值时停止。
+
+代码需要为每一个区块到达事件建立一条确认风险的时间序列。由于 `1e-12` 以下的概率在实际意义上没有区别，代码将低于该阈值的风险值统一截断为 `1e-12`，从而节省内存存储空间。
 
 ---
 
