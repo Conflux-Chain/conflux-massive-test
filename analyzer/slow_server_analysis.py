@@ -258,15 +258,7 @@ def print_run_report(result: dict[str, Any], top_n: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze slow remote servers for Conflux performance runs")
-    parser.add_argument(
-        "--logs",
-        nargs="+",
-        default=[
-            "logs/20260226160703",
-            "logs/20260226163242",
-        ],
-        help="Run log directories to analyze",
-    )
+    parser.add_argument("--logs", nargs="+", help="Run log directories to analyze", required=True)
     parser.add_argument("--top", type=int, default=15, help="Top N hosts to print")
     parser.add_argument(
         "--top-propagation-candidates",
