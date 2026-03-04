@@ -14,3 +14,7 @@ class InstanceConfig:
     
     disk_size: int = 40
     internet_max_bandwidth_out: int = 100
+
+    # Spot instances (optional, used by Aliyun/AWS image build flows)
+    use_spot: bool = False
+    spot_strategy: str = "SpotAsPriceGo"

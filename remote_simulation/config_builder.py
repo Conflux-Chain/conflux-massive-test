@@ -39,6 +39,7 @@ class ConfluxOptions:
     max_block_size_in_bytes: int = 200 * 1024
     execution_prefetch_threads: int = 8
     target_block_gas_limit: int = 30_000_000
+    max_outgoing_peers: int = 8
 
     
     # PoS / Transition configurations

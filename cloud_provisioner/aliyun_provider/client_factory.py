@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from alibabacloud_tea_openapi.models import Config as AliyunConfig
 
@@ -10,11 +10,12 @@ from .security_group import create_security_group, get_security_groups_in_region
 from .v_switch import create_v_switch, get_v_switchs_in_region
 from .vpc import create_vpc, get_vpcs_in_region
 from .zone import get_zone_ids_in_region
-from .instance import create_instances_in_zone, describe_instance_status
+from .instance import create_instances_in_zone, delete_instances, describe_instance_status, get_instances_with_tag
 
-from ..create_instances.provider_interface import IEcsClient
+from ..provider_interface import IEcsClient
 from ..create_instances.instance_config import InstanceConfig
-from ..create_instances.types import ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
+from ..cleanup_instances.types import InstanceInfoWithTag
+from ..create_instances.types import CreateInstanceError, ImageInfo, InstanceStatus, KeyPairInfo, KeyPairRequestConfig, SecurityGroupInfo, VSwitchInfo, VpcInfo, InstanceType, RegionInfo, ZoneInfo
 
 
 @dataclass
@@ -46,6 +47,10 @@ class AliyunClient(IEcsClient):
     def describe_instance_status(self, region_id: str, instance_ids: List[str]) -> InstanceStatus:
         client = self.build(region_id)
         return describe_instance_status(client, region_id, instance_ids)
+    
+    def get_instances_with_tag(self, region_id: str) -> List[InstanceInfoWithTag]:
+        client = self.build(region_id)
+        return get_instances_with_tag(client, region_id)
         
     def get_images_in_region(self, region_id: str, image_name: str) -> List[ImageInfo]:
         client = self.build(region_id)
@@ -73,11 +78,15 @@ class AliyunClient(IEcsClient):
         region_info: RegionInfo,
         zone_info: ZoneInfo,
         instance_type: InstanceType,
-        amount: int,
-        allow_partial_success: bool = False,
-    ) -> list[str]:
+        max_amount: int,
+        min_amount: int,
+    ) -> Tuple[list[str], CreateInstanceError]:
         client = self.build(region_info.id)
-        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, amount, allow_partial_success)
+        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
+    
+    def delete_instances(self, region_id: str, instances_ids: List[str]):
+        client = self.build(region_id)
+        return delete_instances(client, region_id, instances_ids)
         
     def create_keypair(self, region_id: str, key_pair: KeyPairRequestConfig):
         client = self.build(region_id)

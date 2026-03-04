@@ -4,6 +4,7 @@
 This script reads an inventory (by default `hosts.json`), launches nodes, runs the experiment, and collects logs.
 """
 import os
+import argparse
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
@@ -22,6 +23,7 @@ from remote_simulation.config_builder import ConfluxOptions, SimulateOptions, ge
 from remote_simulation.network_connector import connect_nodes
 from remote_simulation.network_topology import NetworkTopology
 from remote_simulation.port_allocation import remote_rpc_port
+from remote_simulation.image_prepare import prepare_images_by_zone
 from remote_simulation.remote_node import RemoteNode
 from remote_simulation.tools import init_tx_gen, wait_for_nodes_synced
 from utils.counter import AtomicCounter
@@ -57,7 +59,7 @@ def _test_say_hello(
 
 def _launch_node(host: HostSpec, index: int, enable_flamegraph: bool = False) -> RemoteNode | None:
     try:
-        shell_cmds.ssh(host.ip, "root", docker_cmds.launch_node(index))
+        shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.launch_node(index))
     except Exception as exc:
         logger.info(f"{host.region} 实例 {host.ip} 节点 {index} 启动失败：{exc}")
         return None
@@ -78,12 +80,12 @@ def _launch_node(host: HostSpec, index: int, enable_flamegraph: bool = False) ->
 
 def _execute_instance(host: HostSpec, nodes_per_host: int, config_file, pull_docker_image: bool, enable_flamegraph: bool = False) -> List[RemoteNode]:
     try:
-        shell_cmds.scp(config_file.path, host.ip, "root", "~/config.toml")
+        shell_cmds.scp(config_file.path, host.ip, host.ssh_user, "~/config.toml")
         logger.debug(f"实例 {host.ip} 同步配置完成")
         if pull_docker_image:
-            shell_cmds.ssh(host.ip, "root", docker_cmds.pull_image())
+            shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.pull_image())
             logger.debug(f"实例 {host.ip} 拉取 docker 镜像完成")
-        shell_cmds.ssh(host.ip, "root", docker_cmds.destory_all_nodes())
+        shell_cmds.ssh(host.ip, host.ssh_user, docker_cmds.destory_all_nodes())
         logger.debug(f"实例 {host.ip} 状态初始化完成，开始启动节点")
     except Exception as exc:
         logger.warning(f"{host.region} 无法初始化实例 {host.ip}: {exc}")
@@ -92,8 +94,7 @@ def _execute_instance(host: HostSpec, nodes_per_host: int, config_file, pull_doc
     launch_future = NODE_CONNECT_POOL.map(lambda idx: _launch_node(host, idx, enable_flamegraph), range(nodes_per_host))
     return [n for n in launch_future if n is not None]
 
-
-def launch_remote_nodes_root(hosts: List[HostSpec], config_file, pull_docker_image: bool = True, enable_flamegraph: bool = False) -> List[RemoteNode]:
+def launch_remote_nodes(hosts: List[HostSpec], config_file, pull_docker_image: bool = True, enable_flamegraph: bool = False) -> List[RemoteNode]:
     logger.info("开始启动所有 Conflux 节点")
 
     def _run_host(host: HostSpec):
@@ -106,45 +107,66 @@ def launch_remote_nodes_root(hosts: List[HostSpec], config_file, pull_docker_ima
     return nodes
 
 
-def collect_logs_root(nodes: List[RemoteNode], local_path: str) -> None:
+def collect_logs(nodes: List[RemoteNode], local_path: str) -> None:
     total_cnt = len(nodes)
     counter1 = AtomicCounter()
     counter2 = AtomicCounter()
-    script_local = Path(__file__).resolve().parent / "auxiliary" / "scripts" / "remote" / "collect_logs_root.sh"
+    script_local = Path(__file__).resolve().parent / "scripts" / "remote" / "collect_logs_root.sh"
     if not script_local.exists():
         raise FileNotFoundError(f"missing {script_local}")
 
     Path(local_path).mkdir(parents=True, exist_ok=True)
 
-    def _stop_and_collect(node: RemoteNode) -> int:
+    def _archive_base(host: HostSpec) -> str:
+        return "/root" if host.ssh_user == "root" else f"/home/{host.ssh_user}"
+
+    def _generate(node: RemoteNode) -> tuple[RemoteNode, bool]:
         try:
             remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
-            shell_cmds.scp(str(script_local), node.host_spec.ip, "root", remote_script)
-            shell_cmds.ssh(node.host_spec.ip, "root", ["bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
-            shell_cmds.ssh(node.host_spec.ip, "root", ["rm", "-f", remote_script])
+            shell_cmds.scp(str(script_local), node.host_spec.ip, node.host_spec.ssh_user, remote_script)
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["sudo", "bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_script])
             cnt1 = counter1.increment()
             logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
+            return node, True
+        except Exception as exc:
+            logger.warning(f"节点 {node.id} 日志生成遇到问题: {exc}")
+            return node, False
+
+    def _sync(node: RemoteNode) -> int:
+        try:
             local_node_path = str(Path(local_path) / node.id)
             Path(local_node_path).mkdir(parents=True, exist_ok=True)
-            shell_cmds.rsync_download(
-                f"/root/output{node.index}/",
-                local_node_path,
-                node.host_spec.ip,
-                user="root",
-            )
+            remote_output_dir = f"{_archive_base(node.host_spec)}/output{node.index}/"
+            shell_cmds.rsync_download(remote_output_dir, local_node_path, node.host_spec.ip, user=node.host_spec.ssh_user)
             cnt2 = counter2.increment()
             logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
             return 0
         except Exception as exc:
-            logger.warning(f"节点 {node.id} 日志生成遇到问题: {exc}")
+            logger.warning(f"节点 {node.id} 日志同步遇到问题: {exc}")
             return 1
 
-    with ThreadPoolExecutor(max_workers=200) as executor:
-        results = executor.map(_stop_and_collect, nodes)
-    _ = sum(results)
+    with ThreadPoolExecutor(max_workers=128) as gen_executor:
+        gen_results = list(gen_executor.map(_generate, nodes))
+
+    gen_success_nodes = [n for n, ok in gen_results if ok]
+    gen_success_cnt = len(gen_success_nodes)
+    logger.info(f"日志生成阶段完成: 成功 {gen_success_cnt}/{total_cnt}，准备开始同步阶段")
+
+    with ThreadPoolExecutor(max_workers=32) as sync_executor:
+        sync_results = list(sync_executor.map(_sync, gen_success_nodes))
+
+    sync_failures = sum(sync_results)
+    sync_success_cnt = len(gen_success_nodes) - sync_failures
+    logger.info(f"日志同步完成: 成功 {sync_success_cnt}/{gen_success_cnt}（{sync_failures} 失败）")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run a Conflux simulation on provisioned cloud instances")
+    parser.add_argument("--log-prefix", default="logs", help="Base directory prefix for logs")
+    parser.add_argument("--enable-flamegraph", action="store_true", help="Enable flamegraph profiling in nodes")
+    args = parser.parse_args()
+
     root = Path(__file__).resolve().parent
     servers_json = root / "hosts.json"
 
@@ -168,11 +190,6 @@ if __name__ == "__main__":
     if total_nodes <= 0:
         raise RuntimeError("no nodes scheduled to start")
 
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--enable-flamegraph", action="store_true", help="Enable flamegraph profiling in nodes")
-    args = parser.parse_args()
-
     simulation_config = SimulateOptions(
         target_nodes=total_nodes,
         # nodes_per_host=max_nodes_per_host,
@@ -195,10 +212,13 @@ if __name__ == "__main__":
     config_file = generate_config_file(simulation_config, node_config)
     logger.success(f"完成配置文件 {config_file.path}")
 
-    log_path = f"logs/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+    log_path = f"{args.log_prefix}/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
-    nodes = launch_remote_nodes_root(hosts, config_file, pull_docker_image=True, enable_flamegraph=simulation_config.enable_flamegraph)
+    logger.info("准备分区内镜像拉取 (dockerhub -> zone peers -> local registry)")
+    prepare_images_by_zone(hosts)
+
+    nodes = launch_remote_nodes(hosts, config_file, pull_docker_image=False, enable_flamegraph=simulation_config.enable_flamegraph)
     if len(nodes) < simulation_config.target_nodes:
         # raise RuntimeError("Not all nodes started")
         logger.warning(f"启动了{len(nodes)}个节点，少于预期的{simulation_config.target_nodes}个节点")
@@ -246,7 +266,7 @@ if __name__ == "__main__":
             for attempt in range(36):
                 try:
                     res = shell_cmds.ssh(node.host_spec.ip, "root", f"test -f ~/log{node.index}/flame_start_{node.index}.txt && echo ok || echo no")
-                    if res.stdout.strip() == "ok":
+                    if res and res.stdout and res.stdout.strip() == "ok":
                         delta = time.time() - start_ts
                         logger.info(f"Profiler on node {node.id} reported flame_start after {delta:.1f}s")
                         return (node, True, delta)
@@ -290,6 +310,6 @@ if __name__ == "__main__":
         logger.info(f"Node goodput: {nodes[0].rpc.test_getGoodPut()}")
     except Exception as exc:
         logger.warning(f"无法获取 Node goodput: {exc}")
-    collect_logs_root(nodes, log_path)
+    collect_logs(nodes, log_path)
     logger.success(f"日志收集完毕，路径 {os.path.abspath(log_path)}")
 

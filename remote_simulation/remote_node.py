@@ -39,6 +39,10 @@ class RemoteNode:
         return f"{self.host_spec.ip}-{self.index}"
     
     @property
+    def desc(self) -> str:
+        return f"{self.host_spec.ip}-{self.index} ({self.host_spec.provider}/{self.host_spec.zone})"
+    
+    @property
     def p2p_addr(self) -> str:
         port = p2p_port(self.index)
         return f"{self.host_spec.ip}:{port}"

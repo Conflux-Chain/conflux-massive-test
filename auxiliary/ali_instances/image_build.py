@@ -360,7 +360,7 @@ async def prepare_docker_server_image(host: str, cfg: EcsRuntimeConfig) -> None:
             if check and r.exit_status != 0:
                 raise RuntimeError(f"failed: {cmd}")
 
-        prepare_script = Path(__file__).resolve().parent.parent / "auxiliary" / "scripts" / "remote" / "prepare_docker_server_image.sh"
+        prepare_script = Path(__file__).resolve().parent.parent / "scripts" / "remote" / "prepare_docker_server_image.sh"
         if not prepare_script.exists():
             raise FileNotFoundError(f"prepare script not found: {prepare_script}")
         remote_prepare = f"/tmp/{prepare_script.name}.{int(time.time())}.sh"

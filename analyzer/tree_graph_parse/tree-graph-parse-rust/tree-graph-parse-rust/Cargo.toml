@@ -1,0 +1,34 @@
+[package]
+name = "tree-graph-parse-rust"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+regex = { workspace = true }
+glob = { workspace = true }
+ethereum-types = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+rayon = { workspace = true }
+statrs = { workspace = true }
+cached = { workspace = true }
+itertools = { workspace = true }
+walkdir = { workspace = true }
+
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench_random_walk_prob"
+harness = false 
+
+[[bin]]
+name = "compute_confirmation"  # 可执行文件名
+path = "src/bin/compute_confirmation.rs"
+
+[[bin]]
+name = "analyze_all_nodes"  # 可执行文件名
+path = "src/bin/analyze_all_nodes.rs"

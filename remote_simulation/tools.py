@@ -1,9 +1,13 @@
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import threading
+import time
 from typing import List, Tuple
 
 from loguru import logger
 
+from cloud_provisioner.host_spec import HostSpec
 from remote_simulation import docker_cmds
 from utils import shell_cmds
 from utils.counter import AtomicCounter
@@ -31,15 +35,15 @@ def check_nodes_synced(executor: ThreadPoolExecutor, nodes: List[RemoteNode]):
     block_to_nodes = defaultdict(list)
     for node, block_hash in zip(nodes, best_blocks):
         if block_hash is not None:
-            block_to_nodes[block_hash].append(node.id)
+            block_to_nodes[block_hash].append(node)
     
     # 找出 cnt <= 5 的 block hash 及其对应的节点 id
-    rare_blocks_info = [(block_hash, len(node_ids), node_ids) for block_hash, node_ids in block_to_nodes.items() if len(node_ids) <= 5]
+    rare_blocks_info = [(block_hash, len(nodes), nodes) for block_hash, nodes in block_to_nodes.items() if len(nodes) <= 5]
     
     if len(rare_blocks_info) > 0:
         logger.debug("出现次数不超过5的区块及其节点:")
-        for (block_hash, cnt, node_ids) in rare_blocks_info:
-            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {",".join(node_ids)}")
+        for (block_hash, cnt, nodes) in rare_blocks_info:
+            logger.debug(f"  区块 {block_hash}: 出现 {cnt} 次, 节点 ID: {",".join([f"{node.id}({node.host_spec.provider}/{node.host_spec.zone})" for node in nodes])}")
     
     most_common = Counter(best_blocks).most_common(1)
     if not most_common:
@@ -91,7 +95,7 @@ def _stop_node_and_collect_log(node: RemoteNode, *, counter1: AtomicCounter, cou
         logger.warning(f"节点 {node.id} 日志生成遇到问题: {e}")
         return 1
     
-def collect_logs(nodes: List[RemoteNode], local_path: str = "./logs", *, max_workers: int = 400):
+def collect_logs(nodes: List[RemoteNode], local_path: str = "./logs", *, max_workers: int = 100):
     counter1 = AtomicCounter()
     counter2 = AtomicCounter()
     total_cnt = len(nodes)
@@ -99,3 +103,56 @@ def collect_logs(nodes: List[RemoteNode], local_path: str = "./logs", *, max_wor
         results = executor.map(lambda node: _stop_node_and_collect_log(node, local_path=local_path, counter1=counter1, counter2=counter2, total_cnt=total_cnt), nodes)
     
     fail_cnt = sum(results)
+    
+def collect_logs_v2(nodes: List[RemoteNode], local_path: str) -> None:
+    total_cnt = len(nodes)
+    counter1 = AtomicCounter()
+    counter2 = AtomicCounter()
+    script_local = Path(__file__).resolve().parent.parent / "scripts" / "remote" / "collect_logs_root.sh"
+    if not script_local.exists():
+        raise FileNotFoundError(f"missing {script_local}")
+
+    Path(local_path).mkdir(parents=True, exist_ok=True)
+
+    def _archive_base(host: HostSpec) -> str:
+        return "/root" if host.ssh_user == "root" else f"/home/{host.ssh_user}"
+
+    def _generate(node: RemoteNode) -> tuple[RemoteNode, bool]:
+        try:
+            remote_script = f"/tmp/{script_local.name}.{int(time.time())}.sh"
+            shell_cmds.scp(str(script_local), node.host_spec.ip, node.host_spec.ssh_user, remote_script)
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["sudo", "bash", remote_script, str(node.index), docker_cmds.IMAGE_TAG])
+            shell_cmds.ssh(node.host_spec.ip, node.host_spec.ssh_user, ["rm", "-f", remote_script])
+            cnt1 = counter1.increment()
+            logger.debug(f"节点 {node.id} 已完成日志生成 ({cnt1}/{total_cnt})")
+            return node, True
+        except Exception as exc:
+            logger.warning(f"节点 {node.id} 日志生成遇到问题: {exc}")
+            return node, False
+
+    def _sync(node: RemoteNode) -> int:
+        try:
+            # local_node_path = str(Path(local_path) / node.id)
+            # Path(local_node_path).mkdir(parents=True, exist_ok=True)
+            # remote_archive = 
+            shell_cmds.rsync_download(f"{_archive_base(node.host_spec)}/output{node.index}/", f"./{local_path}/{node.id}/", node.host_spec.ip, user=node.host_spec.ssh_user, compress_level=3)
+            cnt2 = counter2.increment()
+            logger.debug(f"节点 {node.id} 已完成日志同步 ({cnt2}/{total_cnt})")
+            return 0
+        except Exception as exc:
+            logger.warning(f"节点 {node.id} 日志同步遇到问题: {exc}")
+            return 1
+
+    with ThreadPoolExecutor(max_workers=2000) as gen_executor:
+        gen_results = list(gen_executor.map(_generate, nodes))
+
+    gen_success_nodes = [n for n, ok in gen_results if ok]
+    gen_success_cnt = len(gen_success_nodes)
+    logger.info(f"日志生成阶段完成: 成功 {gen_success_cnt}/{total_cnt}，准备开始同步阶段")
+
+    with ThreadPoolExecutor(max_workers=64) as sync_executor:
+        sync_results = list(sync_executor.map(_sync, gen_success_nodes))
+
+    sync_failures = sum(sync_results)
+    sync_success_cnt = len(gen_success_nodes) - sync_failures
+    logger.info(f"日志同步完成: 成功 {sync_success_cnt}/{gen_success_cnt}（{sync_failures} 失败）")

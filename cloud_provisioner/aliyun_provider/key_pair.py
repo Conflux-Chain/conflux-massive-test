@@ -36,6 +36,6 @@ def create_keypair(client: Client, region_id: str, key_pair: KeyPairRequestConfi
     
     def _available():
         remote_key_pair = get_keypairs_in_region(client, region_id, key_pair.key_pair_name)
-        return remote_key_pair is not None and remote_key_pair.finger_print == key_pair.finger_print
+        return remote_key_pair is not None and remote_key_pair.finger_print == key_pair.finger_print("aliyun")
     
     wait_until(_available, timeout=10, retry_interval=3)

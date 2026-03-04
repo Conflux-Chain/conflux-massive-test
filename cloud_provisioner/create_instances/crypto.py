@@ -47,6 +47,15 @@ def get_fingerprint_from_key(key_path: str, provider: str) -> str:
         fingerprint = hashlib.md5(key_data).hexdigest()
         # 格式化为 xx:xx:xx:... 格式
         return ':'.join(fingerprint[i:i+2] for i in range(0, len(fingerprint), 2))
+    elif provider == 'tencent':
+        # 腾讯云：使用 OpenSSH 格式的 base64 部分，输出 OpenSSH 常用 MD5 指纹格式
+        public_key_bytes = public_key.public_bytes(
+            encoding=serialization.Encoding.OpenSSH,
+            format=serialization.PublicFormat.OpenSSH
+        )
+        key_data = base64.b64decode(public_key_bytes.split()[1])
+        fingerprint = hashlib.md5(key_data).hexdigest()
+        return ':'.join(fingerprint[i:i+2] for i in range(0, len(fingerprint), 2))
     else:
         raise ValueError(f"不支持的云服务商: {provider}")
     
