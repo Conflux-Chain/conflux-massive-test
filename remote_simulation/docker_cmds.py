@@ -1,12 +1,20 @@
+import os
+
 from remote_simulation.port_allocation import p2p_port, rpc_port, pubsub_port, remote_rpc_port, evm_rpc_port, evm_rpc_ws_port
 
 # REMOTE_IMAGE_TAG = "public.ecr.aws/s9d3x9f5/conflux-massive-test/conflux-node:latest"
 REMOTE_IMAGE_TAG = "lylcx2007/conflux-node:latest"
 IMAGE_TAG = "conflux-node:latest"
 REGISTRY_IMAGE = "conflux-node:base"
+
+FLAMEGRAPH_REMOTE_IMAGE_TAG = os.getenv("FLAMEGRAPH_REMOTE_IMAGE_TAG", REMOTE_IMAGE_TAG)
+FLAMEGRAPH_IMAGE_TAG = os.getenv("FLAMEGRAPH_IMAGE_TAG", "conflux-flamegraph:latest")
+FLAMEGRAPH_REGISTRY_IMAGE = os.getenv("FLAMEGRAPH_REGISTRY_IMAGE", "conflux-flamegraph:base")
+
 REGISTRY_PORT = 5000
 REMOTE_SCRIPT_PULL_DOCKERHUB = "/tmp/cfx_pull_image_from_dockerhub_and_push_local.sh"
 REMOTE_SCRIPT_PULL_REGISTRY = "/tmp/cfx_pull_image_from_registry_and_push_local.sh"
+REMOTE_SCRIPT_START_FLAMEGRAPH = "/tmp/start_flamegraph_profiler.sh"
 
 CONTAINER_PREFIX = "conflux_node_"
 
@@ -26,6 +34,8 @@ def launch_node(index: int) -> str:
         f"-p {evm_rpc_ws_port(index)}:{evm_rpc_ws_port(0)}"
     )
 
+    exec_cmd = "./conflux --config /root/config.toml"
+
     cmd_startup = (
         f"sudo rm -rf ~/log{index} &&",
         f"mkdir ~/log{index} &&",
@@ -37,14 +47,30 @@ def launch_node(index: int) -> str:
         *port_cmd,
         "-w /root",                              # 设置工作目录
         IMAGE_TAG, 
-        "./conflux --config /root/config.toml"
+        exec_cmd
     )
 
     return " ".join(cmd_startup)
 
+
+def start_profiler(index: int, duration_s: int = 60) -> str:
+    return " ".join(
+        (
+            "bash",
+            REMOTE_SCRIPT_START_FLAMEGRAPH,
+            str(index),
+            str(duration_s),
+            container_name(index),
+            FLAMEGRAPH_IMAGE_TAG,
+        )
+    )
+
+
 def stop_node_and_collect_log(index: int, *, user = "ubuntu") -> str:
+    # Try to let the process exit cleanly (so flamegraph can finalize), then force-remove.
     stop_node = (
-        f"sudo docker stop {container_name(index)}",
+        f"sudo docker kill --signal=SIGINT {container_name(index)} || true && sleep 5 &&",
+        f"sudo docker rm -f {container_name(index)} || true",
     )
     collect_logs = (
         f"sudo rm -rf ~/output{index} &&",
@@ -68,27 +94,35 @@ def destory_all_nodes() -> str:
     return f"sudo docker ps -aq --filter name={CONTAINER_PREFIX} | xargs -r sudo docker rm -f && sudo rm -rf ~/log* && sudo rm -rf ~/output*"
 
 
-def pull_image_from_dockerhub_and_push_local() -> str:
+def pull_image_from_dockerhub_and_push_local(
+    remote_image_tag: str = REMOTE_IMAGE_TAG,
+    image_tag: str = IMAGE_TAG,
+    registry_image: str = REGISTRY_IMAGE,
+) -> str:
     return " ".join(
         (
             "bash",
             REMOTE_SCRIPT_PULL_DOCKERHUB,
-            REMOTE_IMAGE_TAG,
-            IMAGE_TAG,
-            REGISTRY_IMAGE,
+            remote_image_tag,
+            image_tag,
+            registry_image,
             str(REGISTRY_PORT),
         )
     )
 
 
-def pull_image_from_registry_and_push_local(registry_host: str) -> str:
+def pull_image_from_registry_and_push_local(
+    registry_host: str,
+    image_tag: str = IMAGE_TAG,
+    registry_image: str = REGISTRY_IMAGE,
+) -> str:
     return " ".join(
         (
             "bash",
             REMOTE_SCRIPT_PULL_REGISTRY,
             registry_host,
-            IMAGE_TAG,
-            REGISTRY_IMAGE,
+            image_tag,
+            registry_image,
             str(REGISTRY_PORT),
         )
     )
