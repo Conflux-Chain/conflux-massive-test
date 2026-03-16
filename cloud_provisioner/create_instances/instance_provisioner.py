@@ -23,6 +23,14 @@ def _next_zone_plan_candidate(zone_plan, blocked_zone_ids: set[str]):
         return instance_type, zone_info
 
 
+def _create_instances_in_zone_with_blocked_zone_tracking(client: IEcsClient, blocked_zone_ids: set[str], cfg: InstanceConfig, region_info: RegionInfo, zone_info: ZoneInfo, instance_type: InstanceType, amount: int):
+    instance_ids, err = client.create_instances_in_zone(
+        cfg, region_info, zone_info, instance_type, amount, min_amount=1)
+    if err == CreateInstanceError.ZoneUnavailable:
+        blocked_zone_ids.add(zone_info.id)
+    return instance_ids, err
+
+
 def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provision_config: ProvisionRegionConfig, *, region_info: RegionInfo, instance_types: List[InstanceType], ssh_user: str, provider: str):
     nodes = provision_config.count
     blocked_zone_ids: set[str] = set()
@@ -68,10 +76,8 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
         if provision_config.max_nodes > 0 and hosts_to_request > provision_config.max_nodes:
             hosts_to_request = provision_config.max_nodes
 
-        instance_ids, err = client.create_instances_in_zone(
-            cfg, region_info, zone_info, instance_type, hosts_to_request, min_amount=1)
-        if err == CreateInstanceError.ZoneUnavailable:
-            blocked_zone_ids.add(zone_info.id)
+        instance_ids, err = _create_instances_in_zone_with_blocked_zone_tracking(
+            client, blocked_zone_ids, cfg, region_info, zone_info, instance_type, hosts_to_request)
         
         if len(instance_ids) > 0:
             verifier.submit_pending_instances(instance_ids, instance_type, zone_info.id)
@@ -110,9 +116,8 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
 def _try_create_in_single_zone(client: IEcsClient, verifier: InstanceVerifier, cfg: InstanceConfig, region_info: RegionInfo, instance_type: InstanceType, amount: int):
     blocked_zone_ids: set[str] = set()
     for zone_info in region_info.zones.values():
-        ids, err = client.create_instances_in_zone(cfg, region_info, zone_info, instance_type, amount, min_amount=1)
-        if err == CreateInstanceError.ZoneUnavailable:
-            blocked_zone_ids.add(zone_info.id)
+        ids, err = _create_instances_in_zone_with_blocked_zone_tracking(
+            client, blocked_zone_ids, cfg, region_info, zone_info, instance_type, amount)
         if len(ids) == 0:
             continue
         elif len(ids) < amount:

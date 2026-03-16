@@ -4,18 +4,11 @@ from typing import List
 from botocore.exceptions import ClientError
 from ..create_instances.types import VSwitchInfo
 from ..create_instances.types import ZoneUnavailableError
+from .zone_unavailable import is_zone_unavailable_error
 from utils.wait_until import wait_until
 
 from mypy_boto3_ec2.client import EC2Client
 from mypy_boto3_ec2.type_defs import SubnetTypeDef
-
-
-def _is_zone_unavailable_error(exc: ClientError) -> bool:
-    error = exc.response.get('Error', {})
-    code = str(error.get('Code', ''))
-    message = str(error.get('Message', ''))
-    normalized = f"{code} {message}".lower()
-    return code == 'InvalidParameterValue' and 'availability zone' in normalized and 'unavailable' in normalized
 
 
 
@@ -82,7 +75,7 @@ def create_v_switch(client: EC2Client, zone_id: str, vpc_id: str, v_switch_name:
             ]
         )
     except ClientError as exc:
-        if _is_zone_unavailable_error(exc):
+        if is_zone_unavailable_error(exc):
             raise ZoneUnavailableError(zone_id, str(exc)) from exc
         raise
     
