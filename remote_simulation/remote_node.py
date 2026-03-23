@@ -45,7 +45,8 @@ class RemoteNode:
     @property
     def p2p_addr(self) -> str:
         port = p2p_port(self.index)
-        return f"{self.host_spec.ip}:{port}"
+        host = self.host_spec.p2p_ip or self.host_spec.private_ip or self.host_spec.ip
+        return f"{host}:{port}"
     
     def wait_for_ready(self):
         try:

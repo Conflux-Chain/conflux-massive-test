@@ -40,7 +40,7 @@ class InfraRequest:
             key_pair_tag=config.get_key_pair_tag(),
         )
         return InfraRequest(
-            region_ids=[region.name for region in config.regions],
+            region_ids=[region.name for region in config.active_regions],
             provider=config.provider,
             vpc_name=names.vpc_name,
             v_switch_name=names.v_switch_name,

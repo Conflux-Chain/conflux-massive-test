@@ -17,6 +17,7 @@ class HostSpec:
     zone: str
     instance_id: str
     private_ip: str
+    p2p_ip: Optional[str] = None
 
     
 def save_hosts(hosts: List[HostSpec], file_path: str):

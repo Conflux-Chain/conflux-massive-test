@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 import os
 from typing import List, Optional, Tuple
+from alibabacloud_cbn20170912.client import Client as CbnClient
 from alibabacloud_ecs20140526.client import Client as EcsClient
+from alibabacloud_tea_openapi.client import Client as OpenApiClient
 from alibabacloud_tea_openapi.models import Config as AliyunConfig
 
 from .image import get_images_in_region
@@ -37,6 +39,30 @@ class AliyunClient(IEcsClient):
                 region_id=region_id,
                 read_timeout=120_000,
                 connect_timeout=120_000
+            )
+        )
+
+    def build_cbn(self) -> CbnClient:
+        return CbnClient(
+            AliyunConfig(
+                access_key_id=self.access_key_id,
+                access_key_secret=self.access_key_secret,
+                region_id="cn-hangzhou",
+                endpoint="cbn.aliyuncs.com",
+                read_timeout=120_000,
+                connect_timeout=120_000,
+            )
+        )
+
+    def build_ram(self) -> OpenApiClient:
+        return OpenApiClient(
+            AliyunConfig(
+                access_key_id=self.access_key_id,
+                access_key_secret=self.access_key_secret,
+                region_id="cn-hangzhou",
+                endpoint="ram.aliyuncs.com",
+                read_timeout=120_000,
+                connect_timeout=120_000,
             )
         )
         

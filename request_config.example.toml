@@ -8,6 +8,13 @@ user_tag = "lichenxing-alpha-5"
 image_name = "conflux-docker-registry"
 ssh_key_path = "./keys/ssh-key.pem"
 
+[aliyun.enterprise_network]
+enabled = false
+peer_bandwidth_mbps = 5
+bandwidth_type = "DataTransfer"
+allocate_instance_private_ip = true
+prefer_p2p_ip = true
+
 [[aliyun.regions]]
 # 新加坡
 name = "ap-southeast-1"
@@ -72,6 +79,9 @@ user_tag = "lichenxing-alpha-1"
 image_name = "conflux-docker-registry"
 ssh_key_path = "./keys/ssh-key.pem"
 
+[aws.enterprise_network]
+enabled = false
+
 [[aws.regions]]
 # 美国（俄勒冈）
 # 非“一带一路”国家，测试用
@@ -112,6 +122,9 @@ default_user_name = "ubuntu"
 user_tag = "lichenxing-alpha-5"
 image_name = "conflux-docker-registry"
 ssh_key_path = "./keys/ssh-key.pem"
+
+[tencent.enterprise_network]
+enabled = false
 
 [[tencent.regions]]
 # 香港

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 import tomllib
@@ -16,6 +16,16 @@ class CandidateInstanceType(BaseModel):
     name: str
     nodes: int
 
+
+class EnterpriseNetworkConfig(BaseModel):
+    enabled: bool = False
+    name: Optional[str] = None
+    description: Optional[str] = None
+    peer_bandwidth_mbps: int = 5
+    bandwidth_type: str = "DataTransfer"
+    allocate_instance_private_ip: bool = True
+    prefer_p2p_ip: bool = True
+
 class CloudConfig(BaseModel):
     provider: str
     default_user_name: str
@@ -26,16 +36,31 @@ class CloudConfig(BaseModel):
     key_pair_tag: Optional[str] = None
     regions: List[ProvisionRegionConfig] = []
     instance_types: List[CandidateInstanceType] = []
+    enterprise_network: EnterpriseNetworkConfig = Field(default_factory=EnterpriseNetworkConfig)
     
     @property
     def total_nodes(self):
         return sum([region.count for region in self.regions])
+
+    @property
+    def active_regions(self) -> List[ProvisionRegionConfig]:
+        return [region for region in self.regions if region.count > 0]
     
     def get_key_pair_tag(self) -> str:
         if self.key_pair_tag:
             return self.key_pair_tag
         else:
             return self.user_tag
+
+    def get_enterprise_network_name(self) -> str:
+        if self.enterprise_network.name:
+            return self.enterprise_network.name
+        return f"conflux-massive-test-{self.user_tag}-cen"
+
+    def get_enterprise_network_description(self) -> str:
+        if self.enterprise_network.description:
+            return self.enterprise_network.description
+        return f"Conflux massive test enterprise network for {self.user_tag}"
 
 class ProvisionConfig(BaseModel):
     aliyun: CloudConfig

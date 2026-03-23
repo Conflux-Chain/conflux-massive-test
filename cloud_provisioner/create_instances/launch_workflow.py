@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from loguru import logger
 
 from ..provider_interface import IEcsClient
+from .enterprise_network import assign_enterprise_network_addresses, ensure_enterprise_network
 from .instance_config import InstanceConfig
 from .instance_provisioner import create_instances_in_region
 from .provision_config import CloudConfig, ProvisionRegionConfig
@@ -70,6 +71,7 @@ def ensure_network_infra(
     try:
         request = InfraRequest.from_config(cloud_config, allow_create=allow_create)
         infra_provider = request.ensure_infras(client)
+        ensure_enterprise_network(client, cloud_config, infra_provider)
         logger.success(f"{cloud_config.provider} infra check pass")
         barrier.wait()
     except threading.BrokenBarrierError:
@@ -94,7 +96,7 @@ def create_instances_in_multi_region(
 ):
     instance_config = InstanceConfig(user_tag_value=cloud_config.user_tag)
     instance_types = [InstanceType(item.name, item.nodes) for item in cloud_config.instance_types]
-    regions = [region for region in cloud_config.regions if region.count > 0]
+    regions = cloud_config.active_regions
 
     def create_in_region(provision_config: ProvisionRegionConfig):
         region_id = provision_config.name
@@ -115,6 +117,7 @@ def create_instances_in_multi_region(
         target_total_nodes,
         allow_backfill,
     )
+    hosts = assign_enterprise_network_addresses(client, cloud_config, hosts)
 
     final_nodes = count_nodes(hosts)
     if shortfall <= 0:
