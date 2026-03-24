@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable, List, Optional, Set
 
 from alibabacloud_vpc20160428.client import Client as VpcClient
@@ -9,6 +10,7 @@ from ..create_instances.instance_config import DEFAULT_COMMON_TAG_KEY, DEFAULT_C
 from utils.wait_until import WaitUntilTimeoutError, wait_until
 
 ECS_INSTANCE_TYPE = "EcsInstance"
+MAX_PARALLEL_EIP_OPS = 16
 
 
 def _shared_bandwidth_name(cfg: InstanceConfig) -> str:
@@ -151,6 +153,135 @@ def _get_instance_eip(vpc_client: VpcClient, region_id: str, instance_id: str):
     return eips[0] if eips else None
 
 
+def _collect_relevant_eips(
+    vpc_client: VpcClient,
+    region_id: str,
+    cfg: InstanceConfig,
+    instance_ids: Iterable[str],
+) -> tuple[dict[str, object], dict[str, object]]:
+    target_ids = set(instance_ids)
+    if not target_ids:
+        return {}, {}
+
+    target_name_to_instance = {
+        _eip_name(cfg, instance_id): instance_id for instance_id in target_ids
+    }
+    eips_by_instance: dict[str, object] = {}
+    eips_by_name: dict[str, object] = {}
+
+    for eip in _describe_eips(vpc_client, region_id):
+        attached_instance_id = getattr(eip, "instance_id", None)
+        if attached_instance_id in target_ids and attached_instance_id not in eips_by_instance:
+            eips_by_instance[attached_instance_id] = eip
+            continue
+
+        name = getattr(eip, "name", None)
+        if not name:
+            continue
+
+        target_instance_id = target_name_to_instance.get(name)
+        if target_instance_id is not None and target_instance_id not in eips_by_name:
+            eips_by_name[target_instance_id] = eip
+
+    return eips_by_instance, eips_by_name
+
+
+def _collect_instance_release_eips(
+    vpc_client: VpcClient,
+    region_id: str,
+    instance_ids: Iterable[str],
+) -> dict[str, object]:
+    target_ids = set(instance_ids)
+    if not target_ids:
+        return {}
+
+    suffix_to_instance = {
+        f"-{instance_id}-eip": instance_id for instance_id in target_ids
+    }
+    eips_by_instance: dict[str, object] = {}
+
+    for eip in _describe_eips(vpc_client, region_id):
+        attached_instance_id = getattr(eip, "instance_id", None)
+        if attached_instance_id in target_ids and attached_instance_id not in eips_by_instance:
+            eips_by_instance[attached_instance_id] = eip
+            continue
+
+        name = getattr(eip, "name", None)
+        if not name:
+            continue
+
+        for suffix, instance_id in suffix_to_instance.items():
+            if name.endswith(suffix) and instance_id not in eips_by_instance:
+                eips_by_instance[instance_id] = eip
+                break
+
+    return eips_by_instance
+
+
+def _release_eips_in_parallel(
+    vpc_client: VpcClient,
+    region_id: str,
+    eips: Iterable[object],
+    context_builder,
+) -> int:
+    target_eips = [eip for eip in eips if getattr(eip, "allocation_id", None)]
+    if not target_eips:
+        return 0
+
+    max_workers = min(MAX_PARALLEL_EIP_OPS, len(target_eips))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(
+            lambda eip: _release_eip_resource(
+                vpc_client,
+                region_id,
+                eip,
+                context_builder(eip),
+            ),
+            target_eips,
+        ))
+    return sum(1 for released in results if released)
+
+
+def _delete_shared_bandwidth_packages_in_parallel(
+    vpc_client: VpcClient,
+    region_id: str,
+    packages: Iterable[object],
+    user_prefix: str,
+) -> int:
+    target_packages = [
+        package for package in packages
+        if getattr(package, "bandwidth_package_id", None)
+    ]
+    if not target_packages:
+        return 0
+
+    def _delete_package(package) -> bool:
+        package_id = getattr(package, "bandwidth_package_id", None)
+        if not package_id:
+            return False
+        try:
+            vpc_client.delete_common_bandwidth_package(
+                DeleteCommonBandwidthPackageRequest(
+                    region_id=region_id,
+                    bandwidth_package_id=package_id,
+                )
+            )
+            logger.info(
+                f"Deleted Aliyun shared bandwidth package {package_id} in {region_id} for user-prefix {user_prefix}"
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                f"Failed to delete Aliyun shared bandwidth package {package_id} in {region_id}: {exc}"
+            )
+            return False
+
+    max_workers = min(MAX_PARALLEL_EIP_OPS, len(target_packages))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(_delete_package, target_packages))
+    return sum(1 for deleted in results if deleted)
+
+
 def get_eip_public_ip_map(vpc_client: VpcClient, region_id: str, instance_ids: Iterable[str]) -> dict[str, str]:
     target_ids = set(instance_ids)
     if not target_ids:
@@ -243,18 +374,29 @@ def _allocate_eip(vpc_client: VpcClient, region_id: str, cfg: InstanceConfig, in
     return allocation_id
 
 
-def _ensure_instance_eip(vpc_client: VpcClient, region_id: str, cfg: InstanceConfig, instance_id: str) -> str:
-    current = _get_instance_eip(vpc_client, region_id, instance_id)
+def _ensure_instance_eip(
+    vpc_client: VpcClient,
+    region_id: str,
+    cfg: InstanceConfig,
+    instance_id: str,
+    *,
+    current_eip=None,
+    named_eip=None,
+) -> str:
+    current = current_eip if current_eip is not None else _get_instance_eip(vpc_client, region_id, instance_id)
     if current is not None:
         return current.allocation_id
 
-    existing_by_name = _describe_eips(vpc_client, region_id, eip_name=_eip_name(cfg, instance_id))
     created_now = False
-    if existing_by_name:
-        allocation_id = existing_by_name[0].allocation_id
+    if named_eip is not None:
+        allocation_id = named_eip.allocation_id
     else:
-        allocation_id = _allocate_eip(vpc_client, region_id, cfg, instance_id)
-        created_now = True
+        existing_by_name = _describe_eips(vpc_client, region_id, eip_name=_eip_name(cfg, instance_id))
+        if existing_by_name:
+            allocation_id = existing_by_name[0].allocation_id
+        else:
+            allocation_id = _allocate_eip(vpc_client, region_id, cfg, instance_id)
+            created_now = True
 
     try:
         vpc_client.associate_eip_address(
@@ -286,37 +428,93 @@ def _ensure_instance_eip(vpc_client: VpcClient, region_id: str, cfg: InstanceCon
     return allocation_id
 
 
+def _attach_eip_to_shared_bandwidth_package(
+    vpc_client: VpcClient,
+    region_id: str,
+    package_id: str,
+    eip,
+) -> str:
+    allocation_id = getattr(eip, "allocation_id", None)
+    if not allocation_id:
+        raise RuntimeError(f"Aliyun EIP in {region_id} is missing allocation id")
+
+    if getattr(eip, "bandwidth_package_id", None) == package_id:
+        return allocation_id
+
+    vpc_client.add_common_bandwidth_package_ip(
+        AddCommonBandwidthPackageIpRequest(
+            region_id=region_id,
+            bandwidth_package_id=package_id,
+            ip_instance_id=allocation_id,
+            ip_type="Eip",
+        )
+    )
+    _wait_for_eip(
+        vpc_client,
+        region_id,
+        allocation_id,
+        lambda current: current is not None and current.bandwidth_package_id == package_id,
+        f"join shared bandwidth package {package_id}",
+    )
+    logger.info(f"Added EIP {allocation_id} to shared bandwidth package {package_id} in {region_id}")
+    return allocation_id
+
+
 def ensure_instance_public_network(vpc_client: VpcClient, region_id: str, cfg: InstanceConfig, instance_ids: Iterable[str]) -> list[str]:
     if not cfg.use_aliyun_eip:
         return []
 
-    package_id = ensure_common_bandwidth_package(vpc_client, region_id, cfg)
-    allocation_ids = []
-    for instance_id in instance_ids:
-        allocation_id = _ensure_instance_eip(vpc_client, region_id, cfg, instance_id)
-        eip = _get_eip_by_allocation_id(vpc_client, region_id, allocation_id)
-        if eip is None:
-            raise RuntimeError(f"Cannot find allocated EIP {allocation_id} in {region_id}")
+    unique_instance_ids = list(dict.fromkeys(instance_ids))
+    if not unique_instance_ids:
+        return []
 
-        if eip.bandwidth_package_id != package_id:
-            vpc_client.add_common_bandwidth_package_ip(
-                AddCommonBandwidthPackageIpRequest(
-                    region_id=region_id,
-                    bandwidth_package_id=package_id,
-                    ip_instance_id=allocation_id,
-                    ip_type="Eip",
-                )
-            )
-            _wait_for_eip(
+    package_id = ensure_common_bandwidth_package(vpc_client, region_id, cfg)
+    eips_by_instance, eips_by_name = _collect_relevant_eips(
+        vpc_client,
+        region_id,
+        cfg,
+        unique_instance_ids,
+    )
+
+    max_workers = min(MAX_PARALLEL_EIP_OPS, len(unique_instance_ids))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        allocation_ids = list(executor.map(
+            lambda instance_id: _ensure_instance_eip(
                 vpc_client,
                 region_id,
-                allocation_id,
-                lambda current: current is not None and current.bandwidth_package_id == package_id,
-                f"join shared bandwidth package {package_id}",
-            )
-            logger.info(f"Added EIP {allocation_id} to shared bandwidth package {package_id} in {region_id}")
+                cfg,
+                instance_id,
+                current_eip=eips_by_instance.get(instance_id),
+                named_eip=eips_by_name.get(instance_id),
+            ),
+            unique_instance_ids,
+        ))
 
-        allocation_ids.append(allocation_id)
+    refreshed_eips_by_instance, _ = _collect_relevant_eips(
+        vpc_client,
+        region_id,
+        cfg,
+        unique_instance_ids,
+    )
+    missing_instances = [
+        instance_id for instance_id in unique_instance_ids
+        if instance_id not in refreshed_eips_by_instance
+    ]
+    if missing_instances:
+        raise RuntimeError(
+            f"Cannot find Aliyun EIPs after association in {region_id}: {missing_instances}"
+        )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        list(executor.map(
+            lambda instance_id: _attach_eip_to_shared_bandwidth_package(
+                vpc_client,
+                region_id,
+                package_id,
+                refreshed_eips_by_instance[instance_id],
+            ),
+            unique_instance_ids,
+        ))
 
     return allocation_ids
 
@@ -380,42 +578,38 @@ def _release_eip_resource(vpc_client: VpcClient, region_id: str, eip, context: s
 
 
 def release_instance_public_network(vpc_client: VpcClient, region_id: str, instance_ids: Iterable[str]):
-    for instance_id in instance_ids:
-        eip = _get_instance_eip(vpc_client, region_id, instance_id)
-        if eip is None:
-            by_name = _describe_eips(vpc_client, region_id, eip_name=f"conflux-massive-test-{instance_id}-eip")
-            eip = by_name[0] if by_name else None
-        if eip is None:
-            continue
-        _release_eip_resource(vpc_client, region_id, eip, f"instance {instance_id}")
+    unique_instance_ids = list(dict.fromkeys(instance_ids))
+    eips_by_instance = _collect_instance_release_eips(vpc_client, region_id, unique_instance_ids)
+    _release_eips_in_parallel(
+        vpc_client,
+        region_id,
+        eips_by_instance.values(),
+        lambda eip: f"instance {getattr(eip, 'instance_id', None) or getattr(eip, 'name', 'unknown')}",
+    )
 
 
 def cleanup_user_public_network_artifacts(vpc_client: VpcClient, region_id: str, user_prefix: str) -> tuple[int, int]:
-    released_eips = 0
-    for eip in _describe_eips(vpc_client, region_id):
-        if not _matches_user_prefix(eip, user_prefix):
-            continue
-        if _release_eip_resource(vpc_client, region_id, eip, f"user-prefix {user_prefix}"):
-            released_eips += 1
+    target_eips = [
+        eip for eip in _describe_eips(vpc_client, region_id)
+        if _matches_user_prefix(eip, user_prefix)
+    ]
+    released_eips = _release_eips_in_parallel(
+        vpc_client,
+        region_id,
+        target_eips,
+        lambda eip: f"user-prefix {user_prefix}",
+    )
 
-    deleted_packages = 0
-    for package in list(_iter_all_common_bandwidth_packages(vpc_client, region_id)):
-        if not _matches_user_prefix(package, user_prefix):
-            continue
-        package_id = getattr(package, "bandwidth_package_id", None)
-        if not package_id:
-            continue
-        try:
-            vpc_client.delete_common_bandwidth_package(
-                DeleteCommonBandwidthPackageRequest(
-                    region_id=region_id,
-                    bandwidth_package_id=package_id,
-                )
-            )
-            logger.info(f"Deleted Aliyun shared bandwidth package {package_id} in {region_id} for user-prefix {user_prefix}")
-            deleted_packages += 1
-        except Exception as exc:
-            logger.warning(f"Failed to delete Aliyun shared bandwidth package {package_id} in {region_id}: {exc}")
+    target_packages = [
+        package for package in _iter_all_common_bandwidth_packages(vpc_client, region_id)
+        if _matches_user_prefix(package, user_prefix)
+    ]
+    deleted_packages = _delete_shared_bandwidth_packages_in_parallel(
+        vpc_client,
+        region_id,
+        target_packages,
+        user_prefix,
+    )
 
     return released_eips, deleted_packages
 
