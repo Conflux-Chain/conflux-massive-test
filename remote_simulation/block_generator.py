@@ -13,8 +13,6 @@ from loguru import logger
 from remote_simulation.remote_node import RemoteNode
 from utils.wait_until import wait_until
 
-SCHEDULING_EPSILON_SEC = 1e-6
-
 @dataclass
 class BlockTask:
     """单个区块生成任务"""
@@ -52,9 +50,6 @@ class BlockGenerationPlan:
             # 生成出块时间间隔（指数分布）
             wait_sec = random.expovariate(1000 / self.generation_period_ms)
             scheduled_time = current_time + wait_sec
-
-            if not self._has_available_node(scheduled_time, node_last_scheduled):
-                scheduled_time = self._next_available_time(node_last_scheduled)
             
             # 选择节点，确保该节点距离上次出块至少 min_node_interval_ms
             node_id = self._select_available_node(
@@ -71,20 +66,6 @@ class BlockGenerationPlan:
             current_time = scheduled_time
             
         return tasks
-
-    def _has_available_node(self, scheduled_time: float, node_last_scheduled: dict) -> bool:
-        min_interval_sec = self.min_node_interval_ms / 1000.0
-        return any(
-            scheduled_time - node_last_scheduled.get(node_id, 0) >= min_interval_sec - SCHEDULING_EPSILON_SEC
-            for node_id in self.nodes.keys()
-        )
-
-    def _next_available_time(self, node_last_scheduled: dict) -> float:
-        min_interval_sec = self.min_node_interval_ms / 1000.0
-        return min(
-            node_last_scheduled.get(node_id, 0) + min_interval_sec
-            for node_id in self.nodes.keys()
-        ) + SCHEDULING_EPSILON_SEC
     
     def _select_available_node(self, scheduled_time: float, 
                                node_last_scheduled: dict) -> str:
@@ -94,15 +75,12 @@ class BlockGenerationPlan:
         
         for node_id in self.nodes.keys():
             last_time = node_last_scheduled.get(node_id, 0)
-            if scheduled_time - last_time >= min_interval_sec - SCHEDULING_EPSILON_SEC:
+            if scheduled_time - last_time >= min_interval_sec:
                 available_nodes.append(node_id)
         
-        # 避免边界浮点误差把实验直接中断。
+        # 如果没有可用节点，选择距离上次出块时间最长的节点
         if not available_nodes:
-            return min(
-                self.nodes.keys(),
-                key=lambda node_id: node_last_scheduled.get(node_id, 0),
-            )
+            raise Exception("No node available, consider change the config")
         
         return random.choice(available_nodes)
     
@@ -299,9 +277,6 @@ class SimpleGenerateThread(threading.Thread):
         self.max_block_size = max_block_size
 
     def run(self):
-        success = False
-        rpc_time = math.inf
-        error_msg: Optional[str] = None
         try:
             start = time.time()
             hash = self.node.rpc.test_generateOneBlock(10000000, self.max_block_size)
@@ -312,6 +287,7 @@ class SimpleGenerateThread(threading.Thread):
             rpc_time = round(time.time() - start, 3)
             logger.debug(f"node {self.node.id} generate block {hash}, rpc time {rpc_time}")
             success = True
+            error_msg = None
         except Exception as e:
             rpc_time = math.inf
             success = False
