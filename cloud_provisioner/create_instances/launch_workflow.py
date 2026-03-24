@@ -12,6 +12,19 @@ from .region_backfill import backfill_shortfall, count_nodes, healthy_regions_fo
 from .types import InstanceType
 
 
+def build_instance_config(cloud_config: CloudConfig) -> InstanceConfig:
+    cfg = InstanceConfig(user_tag_value=cloud_config.user_tag)
+    shared_bandwidth = getattr(cloud_config, "shared_bandwidth", None)
+    if cloud_config.provider == "aliyun" and shared_bandwidth is not None and shared_bandwidth.enabled:
+        cfg.use_aliyun_eip = True
+        cfg.internet_max_bandwidth_out = shared_bandwidth.eip_bandwidth_mbps
+        cfg.aliyun_eip_internet_charge_type = shared_bandwidth.internet_charge_type
+        cfg.aliyun_shared_bandwidth_name = f"{cfg.instance_name_prefix}-{cloud_config.user_tag}-shared-bw"
+        cfg.aliyun_shared_bandwidth_mbps = shared_bandwidth.bandwidth_mbps
+        cfg.aliyun_shared_bandwidth_isp = shared_bandwidth.isp
+    return cfg
+
+
 def calculate_shortfall(region_results, target_total_nodes: int) -> int:
     created_nodes = sum(result["actual_nodes"] for result in region_results)
     shortfall = target_total_nodes - created_nodes
@@ -74,7 +87,7 @@ def create_instances_in_multi_region(
     *,
     allow_backfill: bool = True,
 ):
-    instance_config = InstanceConfig(user_tag_value=cloud_config.user_tag)
+    instance_config = build_instance_config(cloud_config)
     instance_types = [InstanceType(i.name, i.nodes) for i in cloud_config.instance_types]
     regions = [region for region in cloud_config.regions if region.count > 0]
 

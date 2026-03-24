@@ -7,6 +7,7 @@ import argparse
 
 from cloud_provisioner.args_check import check_user_prefix_with_config_file, check_empty_user_prefix
 from ..aliyun_provider.client_factory import AliyunClient
+from ..aliyun_provider.eip import cleanup_user_public_network_artifacts
 from ..aws_provider.client_factory import AwsClient
 from ..tencent_provider.client_factory import TencentClient
 from .types import InstanceInfoWithTag
@@ -41,7 +42,7 @@ TENCENT_REGIONS = [
 ]
         
 
-def _delete_in_region(client: IEcsClient, region_id: str, predicate: Callable[[InstanceInfoWithTag], bool]):
+def _delete_in_region(client: IEcsClient, region_id: str, predicate: Callable[[InstanceInfoWithTag], bool], user_prefix: str | None = None):
     logger.info(f"Cleaning region {region_id}")
     instances = client.get_instances_with_tag(region_id)
     instances = list(filter(predicate, instances))
@@ -49,12 +50,23 @@ def _delete_in_region(client: IEcsClient, region_id: str, predicate: Callable[[I
         logger.debug(f"{len(instances)} instances to terminate in region {region_id}: {instances}")
         instance_ids = [instance.instance_id for instance in instances]
         client.delete_instances(region_id, instance_ids)
+
+    if isinstance(client, AliyunClient) and user_prefix is not None:
+        released_eips, deleted_packages = cleanup_user_public_network_artifacts(
+            client.build_vpc(region_id),
+            region_id,
+            user_prefix,
+        )
+        if released_eips > 0 or deleted_packages > 0:
+            logger.info(
+                f"Aliyun extra cleanup in {region_id}: released_eips={released_eips}, deleted_shared_bandwidth_packages={deleted_packages}"
+            )
     logger.success(f"Cleanup region {region_id} done")
 
 
-def delete_instances(client: IEcsClient, regions: List[str], predicate: Callable[[InstanceInfoWithTag], bool]):
+def delete_instances(client: IEcsClient, regions: List[str], predicate: Callable[[InstanceInfoWithTag], bool], user_prefix: str | None = None):
     with ThreadPoolExecutor(max_workers=5) as executor:
-        _ = list(executor.map(lambda region: _delete_in_region(client, region, predicate), regions))
+        _ = list(executor.map(lambda region: _delete_in_region(client, region, predicate, user_prefix), regions))
 
 
 def check_tag(instance: InstanceInfoWithTag, user_prefix: str):
@@ -89,7 +101,7 @@ if __name__ == "__main__":
     with ThreadPoolExecutor() as executor:
         predicate = lambda instance: check_tag(instance, user_prefix)
         futures = [
-            executor.submit(delete_instances, aliyun_client, ALI_REGIONS, predicate=predicate),
+            executor.submit(delete_instances, aliyun_client, ALI_REGIONS, predicate=predicate, user_prefix=user_prefix),
             executor.submit(delete_instances, aws_client, AWS_REGIONS, predicate=predicate),
             executor.submit(delete_instances, tencent_client, TENCENT_REGIONS, predicate=predicate),
         ]

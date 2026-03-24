@@ -16,6 +16,14 @@ class CandidateInstanceType(BaseModel):
     name: str
     nodes: int
 
+
+class AliyunSharedBandwidthConfig(BaseModel):
+    enabled: bool = False
+    bandwidth_mbps: int = 1000
+    eip_bandwidth_mbps: int = 200
+    isp: str = "BGP"
+    internet_charge_type: str = "PayByTraffic"
+
 class CloudConfig(BaseModel):
     provider: str
     default_user_name: str
@@ -37,8 +45,12 @@ class CloudConfig(BaseModel):
         else:
             return self.user_tag
 
+
+class AliyunCloudConfig(CloudConfig):
+    shared_bandwidth: AliyunSharedBandwidthConfig = AliyunSharedBandwidthConfig()
+
 class ProvisionConfig(BaseModel):
-    aliyun: CloudConfig
+    aliyun: AliyunCloudConfig
     aws: CloudConfig
     tencent: CloudConfig
 
