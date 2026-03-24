@@ -13,7 +13,7 @@ enabled = false
 # 默认示例使用高带宽共享带宽包，按流量计费。
 # 如果阿里云在某个地域/账号下对带宽上限有约束，再按实际配额下调。
 bandwidth_mbps = 1000
-eip_bandwidth_mbps = 200
+eip_bandwidth_mbps = 5000
 isp = "BGP"
 internet_charge_type = "PayByTraffic"
 
