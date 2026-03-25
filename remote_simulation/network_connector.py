@@ -4,6 +4,7 @@ from typing import List, Tuple
 from loguru import logger
 
 from remote_simulation.network_topology import NetworkTopology
+from remote_simulation.peer_addressing import peer_p2p_address
 from remote_simulation.remote_node import RemoteNode
 from utils.wait_until import wait_until
 from utils.counter import get_global_counter
@@ -167,7 +168,7 @@ class NetworkConnector:
         from_node = self.nodes[from_idx]
         to_node = self.nodes[to_idx]
 
-        from_node.rpc.test_addNode(to_node.key, to_node.p2p_addr)
+        from_node.rpc.test_addNode(to_node.key, peer_p2p_address(from_node, to_node))
         wait_until(lambda: _check_handshake(from_node, to_node.key), timeout=self.handshake_timeout)
 
         # 配置网络延迟
