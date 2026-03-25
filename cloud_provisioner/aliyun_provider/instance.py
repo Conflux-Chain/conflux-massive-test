@@ -172,8 +172,16 @@ def get_instances_with_tag(client: Client, region_id: str) -> List[InstanceInfoW
         
     return instances
 
-def delete_instances(client: Client, vpc_client: VpcClient, region_id: str, instances_ids: List[str]):
-    release_instance_public_network(vpc_client, region_id, instances_ids)
+def delete_instances(
+    client: Client,
+    vpc_client: VpcClient,
+    region_id: str,
+    instances_ids: List[str],
+    *,
+    release_public_network: bool = True,
+):
+    if release_public_network:
+        release_instance_public_network(vpc_client, region_id, instances_ids)
     for i in range(0, len(instances_ids), 100):
         chunks = instances_ids[i:i+100]
         while True: 
