@@ -16,9 +16,6 @@ class InstanceConfig:
     internet_max_bandwidth_out: int = 100
     use_aliyun_eip: bool = False
     aliyun_eip_internet_charge_type: str = "PayByTraffic"
-    aliyun_shared_bandwidth_name: str | None = None
-    aliyun_shared_bandwidth_mbps: int = 0
-    aliyun_shared_bandwidth_isp: str = "BGP"
 
     # Spot instances (optional, used by Aliyun/AWS image build flows)
     use_spot: bool = False

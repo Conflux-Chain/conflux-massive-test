@@ -52,14 +52,14 @@ def _delete_in_region(client: IEcsClient, region_id: str, predicate: Callable[[I
         client.delete_instances(region_id, instance_ids)
 
     if isinstance(client, AliyunClient) and user_prefix is not None:
-        released_eips, deleted_packages = cleanup_user_public_network_artifacts(
+        released_eips = cleanup_user_public_network_artifacts(
             client.build_vpc(region_id),
             region_id,
             user_prefix,
         )
-        if released_eips > 0 or deleted_packages > 0:
+        if released_eips > 0:
             logger.info(
-                f"Aliyun extra cleanup in {region_id}: released_eips={released_eips}, deleted_shared_bandwidth_packages={deleted_packages}"
+                f"Aliyun extra cleanup in {region_id}: released_eips={released_eips}"
             )
     logger.success(f"Cleanup region {region_id} done")
 

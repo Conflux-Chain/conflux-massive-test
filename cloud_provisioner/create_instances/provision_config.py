@@ -16,14 +16,6 @@ class CandidateInstanceType(BaseModel):
     name: str
     nodes: int
 
-
-class AliyunSharedBandwidthConfig(BaseModel):
-    enabled: bool = False
-    bandwidth_mbps: int = 1000
-    eip_bandwidth_mbps: int = 200
-    isp: str = "BGP"
-    internet_charge_type: str = "PayByTraffic"
-
 class CloudConfig(BaseModel):
     provider: str
     default_user_name: str
@@ -47,7 +39,8 @@ class CloudConfig(BaseModel):
 
 
 class AliyunCloudConfig(CloudConfig):
-    shared_bandwidth: AliyunSharedBandwidthConfig = AliyunSharedBandwidthConfig()
+    use_eip: bool = True
+
 
 class ProvisionConfig(BaseModel):
     aliyun: AliyunCloudConfig

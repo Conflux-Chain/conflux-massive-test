@@ -7,21 +7,15 @@ from ..provider_interface import IEcsClient
 from .instance_config import InstanceConfig
 from .instance_provisioner import create_instances_in_region
 from .network_infra import InfraProvider
-from .provision_config import CloudConfig, ProvisionRegionConfig
+from .provision_config import AliyunCloudConfig, CloudConfig, ProvisionRegionConfig
 from .region_backfill import backfill_shortfall, count_nodes, healthy_regions_for_backfill, run_regions_with_config
 from .types import InstanceType
 
 
 def build_instance_config(cloud_config: CloudConfig) -> InstanceConfig:
     cfg = InstanceConfig(user_tag_value=cloud_config.user_tag)
-    shared_bandwidth = getattr(cloud_config, "shared_bandwidth", None)
-    if cloud_config.provider == "aliyun" and shared_bandwidth is not None and shared_bandwidth.enabled:
-        cfg.use_aliyun_eip = True
-        cfg.internet_max_bandwidth_out = shared_bandwidth.eip_bandwidth_mbps
-        cfg.aliyun_eip_internet_charge_type = shared_bandwidth.internet_charge_type
-        cfg.aliyun_shared_bandwidth_name = f"{cfg.instance_name_prefix}-{cloud_config.user_tag}-shared-bw"
-        cfg.aliyun_shared_bandwidth_mbps = shared_bandwidth.bandwidth_mbps
-        cfg.aliyun_shared_bandwidth_isp = shared_bandwidth.isp
+    if cloud_config.provider == "aliyun" and isinstance(cloud_config, AliyunCloudConfig):
+        cfg.use_aliyun_eip = cloud_config.use_eip
     return cfg
 
 
