@@ -121,7 +121,10 @@ def create_instances_in_multi_region(
     *,
     allow_backfill: bool = True,
 ):
-    instance_config = InstanceConfig(user_tag_value=cloud_config.user_tag)
+    instance_config = InstanceConfig(
+        user_tag_value=cloud_config.user_tag,
+        use_eip=cloud_config.use_eip,
+    )
     instance_types = [InstanceType(i.name, i.nodes)
                       for i in cloud_config.instance_types]
     regions = [region for region in cloud_config.regions if region.count > 0]

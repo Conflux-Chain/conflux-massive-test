@@ -9,6 +9,7 @@ from cloud_provisioner.args_check import check_user_prefix_with_config_file, che
 from ..aliyun_provider.client_factory import AliyunClient
 from ..aws_provider.client_factory import AwsClient
 from ..tencent_provider.client_factory import TencentClient
+from ..tencent_provider.eip import cleanup_user_public_network_artifacts as cleanup_tencent_public_network_artifacts
 from .types import InstanceInfoWithTag
 from ..create_instances.instance_config import DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE, DEFAULT_USER_TAG_KEY
 from ..provider_interface import IEcsClient
@@ -57,6 +58,22 @@ def delete_instances(client: IEcsClient, regions: List[str], predicate: Callable
         _ = list(executor.map(lambda region: _delete_in_region(client, region, predicate), regions))
 
 
+def _cleanup_tencent_eips_in_region(client: TencentClient, region_id: str, user_prefix: str):
+    logger.info(f"Cleaning Tencent EIPs in region {region_id}")
+    released_eips = cleanup_tencent_public_network_artifacts(
+        client.build_vpc(region_id),
+        user_prefix,
+    )
+    if released_eips > 0:
+        logger.info(f"Tencent extra cleanup in {region_id}: released_eips={released_eips}")
+    logger.success(f"Tencent EIP cleanup region {region_id} done")
+
+
+def cleanup_tencent_eips(client: TencentClient, regions: List[str], user_prefix: str):
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        _ = list(executor.map(lambda region: _cleanup_tencent_eips_in_region(client, region, user_prefix), regions))
+
+
 def check_tag(instance: InstanceInfoWithTag, user_prefix: str):
     return instance.tags.get(DEFAULT_COMMON_TAG_KEY) == DEFAULT_COMMON_TAG_VALUE and instance.tags.get(DEFAULT_USER_TAG_KEY, "").startswith(user_prefix)
     
@@ -92,6 +109,7 @@ if __name__ == "__main__":
             executor.submit(delete_instances, aliyun_client, ALI_REGIONS, predicate=predicate),
             executor.submit(delete_instances, aws_client, AWS_REGIONS, predicate=predicate),
             executor.submit(delete_instances, tencent_client, TENCENT_REGIONS, predicate=predicate),
+            executor.submit(cleanup_tencent_eips, tencent_client, TENCENT_REGIONS, user_prefix),
         ]
         from concurrent.futures import wait
 

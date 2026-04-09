@@ -51,8 +51,9 @@ class TencentClient(IEcsClient):
         return get_zone_ids_in_region(client)
 
     def describe_instance_status(self, region_id: str, instance_ids: List[str]) -> InstanceStatus:
-        client = self.build_cvm(region_id)
-        return describe_instance_status(client, instance_ids)
+        cvm_client = self.build_cvm(region_id)
+        vpc_client = self.build_vpc(region_id)
+        return describe_instance_status(cvm_client, vpc_client, instance_ids)
 
     def get_instances_with_tag(self, region_id: str) -> List[InstanceInfoWithTag]:
         client = self.build_cvm(region_id)
@@ -87,12 +88,14 @@ class TencentClient(IEcsClient):
         max_amount: int,
         min_amount: int,
     ) -> tuple[list[str], CreateInstanceError]:
-        client = self.build_cvm(region_info.id)
-        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
+        cvm_client = self.build_cvm(region_info.id)
+        vpc_client = self.build_vpc(region_info.id)
+        return create_instances_in_zone(cvm_client, vpc_client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
 
     def delete_instances(self, region_id: str, instances_ids: List[str]):
-        client = self.build_cvm(region_id)
-        return delete_instances(client, instances_ids)
+        cvm_client = self.build_cvm(region_id)
+        vpc_client = self.build_vpc(region_id)
+        return delete_instances(cvm_client, vpc_client, instances_ids)
 
     def create_keypair(self, region_id: str, key_pair: KeyPairRequestConfig):
         client = self.build_cvm(region_id)
