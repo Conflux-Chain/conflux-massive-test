@@ -13,7 +13,6 @@ from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType, CreateInstanceError
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 from .eip import ensure_instance_public_network, get_eip_public_ip_map, release_instance_public_network
-from .retry import DEFAULT_RETRY_PATTERNS, PENDING_DELETE_RETRY_PATTERNS, call_with_retry
 from utils.wait_until import WaitUntilTimeoutError, wait_until
 
 TERMINATION_BLOCKING_STATES = {"PENDING", "STARTING"}
@@ -41,10 +40,7 @@ def _get_key_id_by_name(client: CvmClient, key_pair_name: str) -> str:
     req.Limit = 100
     req.Offset = 0
 
-    resp = call_with_retry(
-        lambda: client.DescribeKeyPairs(req),
-        action=f"Describe Tencent key pair {key_pair_name}",
-    )
+    resp = client.DescribeKeyPairs(req)
     if not resp.KeyPairSet:
         raise Exception(f"Key pair not found: {key_pair_name}")
     return resp.KeyPairSet[0].KeyId
@@ -54,10 +50,7 @@ def _describe_instances(client: CvmClient, instance_ids: list[str]) -> list[cvm_
     req = cvm_models.DescribeInstancesRequest()
     req.InstanceIds = instance_ids
     req.Limit = len(instance_ids)
-    resp = call_with_retry(
-        lambda: client.DescribeInstances(req),
-        action=f"Describe Tencent instances batch size={len(instance_ids)}",
-    )
+    resp = client.DescribeInstances(req)
     return resp.InstanceSet or []
 
 
@@ -124,10 +117,7 @@ def create_instances_in_zone(
     req.TagSpecification = [tag_spec]
 
     try:
-        resp = call_with_retry(
-            lambda: client.RunInstances(req),
-            action=f"Run Tencent instances in {region_info.id}/{zone_info.id}",
-        )
+        resp = client.RunInstances(req)
         ids = resp.InstanceIdSet or []
         if cfg.use_eip and ids:
             try:
@@ -234,10 +224,7 @@ def get_instances_with_tag(client: CvmClient) -> List[InstanceInfoWithTag]:
         req.Offset = offset
         req.Limit = limit
 
-        rep = call_with_retry(
-            lambda: client.DescribeInstances(req),
-            action="List Tencent instances with tags",
-        )
+        rep = client.DescribeInstances(req)
         if rep.InstanceSet:
             instances.extend([as_instance_info_with_tag(instance) for instance in rep.InstanceSet])
 
@@ -275,14 +262,7 @@ def delete_instances(
         req = cvm_models.TerminateInstancesRequest()
         req.InstanceIds = chunks
         try:
-            call_with_retry(
-                lambda: client.TerminateInstances(req),
-                action=f"Terminate Tencent instances batch size={len(chunks)}",
-                retry_patterns=DEFAULT_RETRY_PATTERNS + PENDING_DELETE_RETRY_PATTERNS,
-                max_attempts=24,
-                initial_delay=5,
-                max_delay=30,
-            )
+            client.TerminateInstances(req)
         except TencentCloudSDKException as exc:
             if "NotFound" in (exc.code or ""):
                 logger.info(f"Tencent instances already gone during termination: {chunks}")
