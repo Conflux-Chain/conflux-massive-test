@@ -13,7 +13,10 @@ from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType, CreateInstanceError
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 from .eip import ensure_instance_public_network, get_eip_public_ip_map, release_instance_public_network
+from .retry import DEFAULT_RETRY_PATTERNS, PENDING_DELETE_RETRY_PATTERNS, call_with_retry
 from utils.wait_until import WaitUntilTimeoutError, wait_until
+
+TERMINATION_BLOCKING_STATES = {"PENDING", "STARTING"}
 
 
 def _instance_tags(cfg: InstanceConfig) -> List[cvm_models.Tag]:
@@ -38,10 +41,24 @@ def _get_key_id_by_name(client: CvmClient, key_pair_name: str) -> str:
     req.Limit = 100
     req.Offset = 0
 
-    resp = client.DescribeKeyPairs(req)
+    resp = call_with_retry(
+        lambda: client.DescribeKeyPairs(req),
+        action=f"Describe Tencent key pair {key_pair_name}",
+    )
     if not resp.KeyPairSet:
         raise Exception(f"Key pair not found: {key_pair_name}")
     return resp.KeyPairSet[0].KeyId
+
+
+def _describe_instances(client: CvmClient, instance_ids: list[str]) -> list[cvm_models.Instance]:
+    req = cvm_models.DescribeInstancesRequest()
+    req.InstanceIds = instance_ids
+    req.Limit = len(instance_ids)
+    resp = call_with_retry(
+        lambda: client.DescribeInstances(req),
+        action=f"Describe Tencent instances batch size={len(instance_ids)}",
+    )
+    return resp.InstanceSet or []
 
 
 def as_instance_info_with_tag(rep: cvm_models.Instance) -> InstanceInfoWithTag:
@@ -107,7 +124,10 @@ def create_instances_in_zone(
     req.TagSpecification = [tag_spec]
 
     try:
-        resp = client.RunInstances(req)
+        resp = call_with_retry(
+            lambda: client.RunInstances(req),
+            action=f"Run Tencent instances in {region_info.id}/{zone_info.id}",
+        )
         ids = resp.InstanceIdSet or []
         if cfg.use_eip and ids:
             try:
@@ -145,11 +165,7 @@ def create_instances_in_zone(
 
 def _wait_for_instances_ready_for_eip(client: CvmClient, instance_ids: list[str]):
     def _all_ready() -> bool:
-        req = cvm_models.DescribeInstancesRequest()
-        req.InstanceIds = instance_ids
-        req.Limit = len(instance_ids)
-        resp = client.DescribeInstances(req)
-        instances = resp.InstanceSet or []
+        instances = _describe_instances(client, instance_ids)
         ready_states = {"RUNNING", "STOPPED"}
         current_states = {instance.InstanceId: instance.InstanceState for instance in instances if instance.InstanceId}
         return len(current_states) == len(instance_ids) and all(state in ready_states for state in current_states.values())
@@ -160,6 +176,25 @@ def _wait_for_instances_ready_for_eip(client: CvmClient, instance_ids: list[str]
         raise RuntimeError(f"Instances are not ready for Tencent EIP association: {instance_ids}") from exc
 
 
+def _wait_for_instances_ready_for_termination(client: CvmClient, instance_ids: list[str]):
+    def _all_terminatable() -> bool:
+        instances = _describe_instances(client, instance_ids)
+        blocking_instances = {
+            instance.InstanceId: instance.InstanceState
+            for instance in instances
+            if instance.InstanceId and instance.InstanceState in TERMINATION_BLOCKING_STATES
+        }
+        if blocking_instances:
+            logger.warning(f"Some Tencent instances are still pending before termination, waiting_retry: {blocking_instances}")
+            return False
+        return True
+
+    try:
+        wait_until(_all_terminatable, timeout=600, retry_interval=5)
+    except WaitUntilTimeoutError as exc:
+        raise RuntimeError(f"Instances are still pending termination readiness: {instance_ids}") from exc
+
+
 def describe_instance_status(client: CvmClient, vpc_client: VpcClient | None, instance_ids: List[str]) -> InstanceStatus:
     running_instances = dict()
     pending_instances = set()
@@ -167,26 +202,23 @@ def describe_instance_status(client: CvmClient, vpc_client: VpcClient | None, in
     for i in range(0, len(instance_ids), 100):
         query_chunk = instance_ids[i: i + 100]
         eip_ip_map = get_eip_public_ip_map(vpc_client, query_chunk) if vpc_client else {}
-
-        req = cvm_models.DescribeInstancesRequest()
-        req.InstanceIds = query_chunk
-        req.Limit = len(query_chunk)
-
-        rep = client.DescribeInstances(req)
-        instance_status = rep.InstanceSet or []
+        instance_status = _describe_instances(client, query_chunk)
 
         for ins in instance_status:
             state = ins.InstanceState
             if state == "RUNNING":
-                public_ip = ins.PublicIpAddresses[0] if ins.PublicIpAddresses else eip_ip_map.get(ins.InstanceId)
+                instance_id = ins.InstanceId
+                public_ip = ins.PublicIpAddresses[0] if ins.PublicIpAddresses else eip_ip_map.get(instance_id) if instance_id else None
                 private_ip = ins.PrivateIpAddresses[0] if ins.PrivateIpAddresses else None
                 if not public_ip or not private_ip:
-                    if ins.InstanceId:
-                        pending_instances.add(ins.InstanceId)
+                    if instance_id:
+                        pending_instances.add(instance_id)
                     continue
-                running_instances[ins.InstanceId] = (public_ip, private_ip)
+                if instance_id:
+                    running_instances[instance_id] = (public_ip, private_ip)
             elif state in {"PENDING", "STARTING", "STOPPING", "STOPPED", "REBOOTING", "LAUNCH_FAILED"}:
-                pending_instances.add(ins.InstanceId)
+                if ins.InstanceId:
+                    pending_instances.add(ins.InstanceId)
         time.sleep(0.5)
 
     return InstanceStatus(running_instances=running_instances, pending_instances=pending_instances)
@@ -202,7 +234,10 @@ def get_instances_with_tag(client: CvmClient) -> List[InstanceInfoWithTag]:
         req.Offset = offset
         req.Limit = limit
 
-        rep = client.DescribeInstances(req)
+        rep = call_with_retry(
+            lambda: client.DescribeInstances(req),
+            action="List Tencent instances with tags",
+        )
         if rep.InstanceSet:
             instances.extend([as_instance_info_with_tag(instance) for instance in rep.InstanceSet])
 
@@ -213,27 +248,44 @@ def get_instances_with_tag(client: CvmClient) -> List[InstanceInfoWithTag]:
     return instances
 
 
-def delete_instances(client: CvmClient, vpc_client: VpcClient, instances_ids: List[str]):
-    cfg = InstanceConfig(user_tag_value="")
-    try:
-        released = release_instance_public_network(vpc_client, cfg, instances_ids)
-        if released > 0:
-            logger.info(f"Released {released} Tencent EIPs before terminating instances")
-    except Exception as exc:
-        logger.error(f"Failed to release Tencent EIPs before termination: {exc}")
-        logger.error(traceback.format_exc())
+def delete_instances(
+    client: CvmClient,
+    vpc_client: VpcClient,
+    instances_ids: List[str],
+    *,
+    release_public_network: bool = True,
+):
+    if release_public_network:
+        cfg = InstanceConfig(user_tag_value="")
+        try:
+            released = release_instance_public_network(vpc_client, cfg, instances_ids)
+            if released > 0:
+                logger.info(f"Released {released} Tencent EIPs before terminating instances")
+        except Exception as exc:
+            logger.error(f"Failed to release Tencent EIPs before termination: {exc}")
+            logger.error(traceback.format_exc())
 
     for i in range(0, len(instances_ids), 100):
         chunks = instances_ids[i:i + 100]
-        while True:
-            try:
-                req = cvm_models.TerminateInstancesRequest()
-                req.InstanceIds = chunks
-                client.TerminateInstances(req)
-                logger.success(f"Successfully deleted instances: {chunks}")
-                break
-            except TencentCloudSDKException as e:
-                logger.error(f"Cannot delete: {e}")
-            except Exception as e:
-                logger.error(f"Cannot delete: {e}")
-            time.sleep(5)
+        try:
+            _wait_for_instances_ready_for_termination(client, chunks)
+        except Exception as exc:
+            logger.warning(f"Proceeding with Tencent termination retries after readiness wait failed: {exc}")
+
+        req = cvm_models.TerminateInstancesRequest()
+        req.InstanceIds = chunks
+        try:
+            call_with_retry(
+                lambda: client.TerminateInstances(req),
+                action=f"Terminate Tencent instances batch size={len(chunks)}",
+                retry_patterns=DEFAULT_RETRY_PATTERNS + PENDING_DELETE_RETRY_PATTERNS,
+                max_attempts=24,
+                initial_delay=5,
+                max_delay=30,
+            )
+        except TencentCloudSDKException as exc:
+            if "NotFound" in (exc.code or ""):
+                logger.info(f"Tencent instances already gone during termination: {chunks}")
+                continue
+            raise
+        logger.success(f"Successfully deleted instances: {chunks}")

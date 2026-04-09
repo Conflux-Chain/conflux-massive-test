@@ -92,10 +92,15 @@ class TencentClient(IEcsClient):
         vpc_client = self.build_vpc(region_info.id)
         return create_instances_in_zone(cvm_client, vpc_client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
 
-    def delete_instances(self, region_id: str, instances_ids: List[str]):
+    def delete_instances(self, region_id: str, instances_ids: List[str], *, release_public_network: bool = True):
         cvm_client = self.build_cvm(region_id)
         vpc_client = self.build_vpc(region_id)
-        return delete_instances(cvm_client, vpc_client, instances_ids)
+        return delete_instances(
+            cvm_client,
+            vpc_client,
+            instances_ids,
+            release_public_network=release_public_network,
+        )
 
     def create_keypair(self, region_id: str, key_pair: KeyPairRequestConfig):
         client = self.build_cvm(region_id)

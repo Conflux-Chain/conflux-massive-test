@@ -7,12 +7,13 @@ from tencentcloud.vpc.v20170312 import models as vpc_models
 from tencentcloud.vpc.v20170312.vpc_client import VpcClient
 
 from ..create_instances.instance_config import DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE, DEFAULT_USER_TAG_KEY, InstanceConfig
+from .retry import call_with_retry
 from utils.wait_until import WaitUntilTimeoutError, wait_until
 
 BOUND_STATUSES = {"BIND", "BIND_ENI"}
 TRANSITIONAL_STATUSES = {"CREATING", "BINDING", "UNBINDING"}
 UNBOUND_STATUS = "UNBIND"
-MAX_PARALLEL_EIP_OPS = 16
+MAX_PARALLEL_EIP_OPS = 8
 
 
 def _chunks(values: Iterable[str], size: int):
@@ -63,7 +64,10 @@ def _describe_addresses(
         if address_ids:
             req.AddressIds = address_ids
 
-        resp = vpc_client.DescribeAddresses(req)
+        resp = call_with_retry(
+            lambda: vpc_client.DescribeAddresses(req),
+            action="Describe Tencent EIPs",
+        )
         if resp.AddressSet:
             results.extend(resp.AddressSet)
 
@@ -165,7 +169,10 @@ def _allocate_eip(vpc_client: VpcClient, cfg: InstanceConfig, instance_id: str) 
     req.AddressName = _address_name(cfg, instance_id)
     req.Tags = _address_tags(cfg)
 
-    resp = vpc_client.AllocateAddresses(req)
+    resp = call_with_retry(
+        lambda: vpc_client.AllocateAddresses(req),
+        action=f"Allocate Tencent EIP for {instance_id}",
+    )
     address_ids = resp.AddressSet or []
     if not address_ids:
         raise RuntimeError(f"AllocateAddresses returned no address for {instance_id}")
@@ -224,7 +231,10 @@ def _ensure_instance_eip(
     req = vpc_models.AssociateAddressRequest()
     req.AddressId = address_id
     req.InstanceId = instance_id
-    vpc_client.AssociateAddress(req)
+    call_with_retry(
+        lambda: vpc_client.AssociateAddress(req),
+        action=f"Associate Tencent EIP {address_id} to {instance_id}",
+    )
     _wait_for_eip(
         vpc_client,
         address_id,
@@ -296,7 +306,10 @@ def _release_eip_resource(vpc_client: VpcClient, address: vpc_models.Address, co
         req.AddressId = address_id
         req.ReallocateNormalPublicIp = False
         try:
-            vpc_client.DisassociateAddress(req)
+            call_with_retry(
+                lambda: vpc_client.DisassociateAddress(req),
+                action=f"Disassociate Tencent EIP {address_id}",
+            )
         except TencentCloudSDKException as exc:
             if not _is_not_found(exc):
                 raise
@@ -309,7 +322,10 @@ def _release_eip_resource(vpc_client: VpcClient, address: vpc_models.Address, co
         req = vpc_models.ReleaseAddressesRequest()
         req.AddressIds = [address_id]
         try:
-            vpc_client.ReleaseAddresses(req)
+            call_with_retry(
+                lambda: vpc_client.ReleaseAddresses(req),
+                action=f"Release Tencent EIP {address_id}",
+            )
         except TencentCloudSDKException as exc:
             if not _is_not_found(exc):
                 raise
