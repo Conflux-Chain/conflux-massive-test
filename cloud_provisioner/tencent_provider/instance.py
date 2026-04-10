@@ -97,6 +97,7 @@ def create_instances_in_zone(
     req.LoginSettings = login
     req.SecurityGroupIds = [region_info.security_group_id]
     req.TagSpecification = [tag_spec]
+    req.EnableJumboFrame = True
 
     try:
         resp = client.RunInstances(req)
