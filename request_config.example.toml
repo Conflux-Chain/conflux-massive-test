@@ -149,7 +149,7 @@ name = "sa-saopaulo"
 count = 10
 
 [[tencent.instance_types]]
-name = "S5.2XLARGE32"
+name = "S8.2XLARGE32"
 nodes = 1
 
 [[tencent.instance_types]]
@@ -157,5 +157,5 @@ name = "SA5.2XLARGE32"
 nodes = 1
 
 [[tencent.instance_types]]
-name = "S3.2XLARGE32"
+name = "C6.2XLARGE32"
 nodes = 1
