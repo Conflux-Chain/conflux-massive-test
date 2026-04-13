@@ -135,6 +135,10 @@ if __name__ == "__main__":
         logger.info(f"随机选择观察节点 {sample_node.host_spec.ip} 来自 {sample_node.host_spec.provider} {sample_node.host_spec.zone}")
         logger.success("所有节点已启动，准备连接拓扑网络")
 
+        if args.capture_pcap:
+            logger.info("开始在远程主机抓取 Conflux 端口流量")
+            start_pcap_capture(host_specs)
+
         # 4. 手动连接网络
         topology = NetworkTopology.generate_random_topology(len(nodes), simulation_config.connect_peers, latency_max=0)
         for k, v in topology.peers.items():
@@ -146,10 +150,6 @@ if __name__ == "__main__":
             wait_for_nodes_synced(nodes, max_workers=2000)
         except WaitUntilTimeoutError as exc:
             logger.warning(f"等待节点同步超时: {exc}")
-
-        if args.capture_pcap:
-            logger.info("开始在远程主机抓取 Conflux 端口流量")
-            start_pcap_capture(host_specs)
 
         # 5. 开始运行实验
         init_tx_gen(nodes, node_config.txgen_account_count)
