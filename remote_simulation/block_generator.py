@@ -49,11 +49,11 @@ class BlockGenerationPlan:
         for i in range(self.num_blocks):
             # 生成出块时间间隔（指数分布）
             wait_sec = random.expovariate(1000 / self.generation_period_ms)
-            scheduled_time = current_time + wait_sec
+            requested_time = current_time + wait_sec
             
-            # 选择节点，确保该节点距离上次出块至少 min_node_interval_ms
-            node_id = self._select_available_node(
-                scheduled_time, node_last_scheduled
+            # 如果随机间隔过短，顺延到最早有节点可出块的时间点。
+            scheduled_time, node_id = self._schedule_next_block(
+                requested_time, node_last_scheduled
             )
             
             tasks.append(BlockTask(
@@ -66,23 +66,37 @@ class BlockGenerationPlan:
             current_time = scheduled_time
             
         return tasks
-    
-    def _select_available_node(self, scheduled_time: float, 
-                               node_last_scheduled: dict) -> str:
-        """选择一个可用节点（距离上次出块时间足够长）"""
+
+    def _schedule_next_block(self, scheduled_time: float,
+                             node_last_scheduled: dict) -> tuple[float, str]:
+        available_nodes = self._available_nodes_at(scheduled_time, node_last_scheduled)
+        if available_nodes:
+            return scheduled_time, random.choice(available_nodes)
+
+        min_interval_sec = self.min_node_interval_ms / 1000.0
+        next_available_time = min(
+            last_time + min_interval_sec
+            for last_time in node_last_scheduled.values()
+        )
+        adjusted_time = max(scheduled_time, next_available_time + 1e-6)
+        available_nodes = self._available_nodes_at(adjusted_time, node_last_scheduled)
+
+        if not available_nodes:
+            raise Exception("No node available after rescheduling")
+
+        return adjusted_time, random.choice(available_nodes)
+
+    def _available_nodes_at(self, scheduled_time: float,
+                            node_last_scheduled: dict) -> list[str]:
         min_interval_sec = self.min_node_interval_ms / 1000.0
         available_nodes = []
-        
+
         for node_id in self.nodes.keys():
             last_time = node_last_scheduled.get(node_id, 0)
-            if scheduled_time - last_time >= min_interval_sec:
+            if scheduled_time - last_time >= min_interval_sec - 1e-6:
                 available_nodes.append(node_id)
-        
-        # 如果没有可用节点，选择距离上次出块时间最长的节点
-        if not available_nodes:
-            raise Exception("No node available, consider change the config")
-        
-        return random.choice(available_nodes)
+
+        return available_nodes
     
     def validate(self, tasks: List[BlockTask]) -> bool:
         """验证出块计划是否满足约束条件"""
@@ -277,6 +291,9 @@ class SimpleGenerateThread(threading.Thread):
         self.max_block_size = max_block_size
 
     def run(self):
+        rpc_time = math.inf
+        success = False
+        error_msg = None
         try:
             start = time.time()
             hash = self.node.rpc.test_generateOneBlock(10000000, self.max_block_size)
