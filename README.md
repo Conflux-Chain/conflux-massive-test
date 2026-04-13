@@ -55,6 +55,7 @@ Notes:
 - Logs for a run are stored under `logs/{timestamp}` as created by the provisioning step (or the experiment will create a `logs/{timestamp}` folder if none is specified).
 - Image preparation and remote helper scripts are located in `auxiliary/scripts/remote` (e.g., `prepare_conflux_builder.sh`, `prepare_docker_server_image.sh`, `collect_logs_root.sh`). These scripts are executed on the remote instances as `root` by the orchestration code.
 - The orchestration prefers `scp` to fetch logs (it will fall back to `rsync` if available on the remote host).
+- `python -m remote_simulation --capture-pcap` enables optional host-level `tcpdump` capture during the experiment and pulls compressed `pcap` artifacts back alongside the normal logs. If `tcpdump` or `7z` is unavailable on a remote host, the run still continues and a status file is collected.
 
 ### Running on AWS (Legacy)
 

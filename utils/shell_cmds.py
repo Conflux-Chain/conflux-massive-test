@@ -41,7 +41,16 @@ def scp(
                 logger.debug(f"{ip_address} SCP 失败，已达到最大重试次数")
                 raise
 
-def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: str = "ubuntu", compress_level: int = 12, max_retries: int = 3):
+def rsync_download(
+    remote_path: str,
+    local_path: str,
+    ip_address: str,
+    *,
+    user: str = "ubuntu",
+    compress_level: int = 12,
+    max_retries: int = 3,
+    timeout_sec: int = 20,
+):
     key_args = _ssh_key_args()
     key_opt = "" if not key_args else f" -i {key_args[1]}"
     rsync_cmd = [
@@ -60,7 +69,7 @@ def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: 
     # Python 层面实现重试
     for attempt in range(max_retries):
         try:
-            completed = subprocess.run(rsync_cmd, check=True, capture_output=True, text=True, timeout=20)
+            completed = subprocess.run(rsync_cmd, check=True, capture_output=True, text=True, timeout=timeout_sec)
             # logger.debug(f"rsync completed: {completed.stdout}")
             return  # 成功则返回
         except subprocess.CalledProcessError as e:
