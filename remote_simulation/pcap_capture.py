@@ -105,7 +105,7 @@ def start_pcap_capture(host_specs: Iterable[HostSpec], *, max_workers: int = 64)
     logger.info(f"抓包启动阶段完成: 正常启动 {started_count}/{len(hosts)}")
 
 
-def collect_pcap_artifacts(host_specs: Iterable[HostSpec], local_path: str, *, max_workers: int = 32) -> None:
+def collect_pcap_artifacts(host_specs: Iterable[HostSpec], local_path: str, *, max_workers: int = 128) -> None:
     hosts = _unique_hosts(host_specs)
     if not hosts:
         return
