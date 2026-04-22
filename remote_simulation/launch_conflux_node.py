@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from cloud_provisioner.host_spec import HostSpec
 from . import docker_cmds
+from .host_diagnostics import start_host_diagnostics
 from .remote_node import RemoteNode
 from utils import shell_cmds
 from remote_simulation.port_allocation import remote_rpc_port
@@ -83,10 +84,10 @@ def destory_remote_nodes(host_specs: List[HostSpec]):
 
 def _execute_instance(host_spec: HostSpec, ctx: InstanceExecutionContext) -> List[RemoteNode]:
     # 返回失败节点数量
-    try:
-        ip_address = host_spec.ip
-        user = host_spec.ssh_user
+    ip_address = host_spec.ip
+    user = host_spec.ssh_user
 
+    try:
         shell_cmds.scp("./scripts/setup_image.sh", ip_address, user, "~/setup_image.sh")
         # logger.debug(f"实例 {ip_address} 上传初始化脚本完成")
         shell_cmds.ssh(ip_address, user, "~/setup_image.sh")
@@ -100,8 +101,11 @@ def _execute_instance(host_spec: HostSpec, ctx: InstanceExecutionContext) -> Lis
         # 清理之前实验的残留数据        
         if ctx.clear_environment:
             shell_cmds.ssh(ip_address, user, docker_cmds.destory_all_nodes())
+
+        if not start_host_diagnostics(host_spec):
+            logger.warning(f"实例 {ip_address} 主机诊断未能启动，将继续启动节点")
         
-        logger.debug(f"实例 {ip_address} 状态初始化完成，开始启动节点 ({get_global_counter("execute_5").increment()})")
+        logger.debug(f"实例 {ip_address} 状态初始化完成，开始启动节点 ({get_global_counter('execute_5').increment()})")
     except Exception as e:
         logger.warning(f"无法初始化实例 {ip_address}: {e}")
         return list()
