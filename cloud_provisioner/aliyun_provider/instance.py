@@ -6,6 +6,7 @@ import traceback
 from typing import List, Tuple
 
 from alibabacloud_ecs20140526.models import DescribeInstancesRequest, RunInstancesRequestTag, RunInstancesRequestSystemDisk, RunInstancesRequest, DescribeInstancesResponseBodyInstancesInstance, DeleteInstancesRequest
+from alibabacloud_vpc20160428.client import Client as VpcClient
 from loguru import logger
 
 from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
@@ -13,6 +14,8 @@ from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 from ..create_instances.types import InstanceStatus, RegionInfo, ZoneInfo, InstanceType, CreateInstanceError
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
 from alibabacloud_ecs20140526.client import Client
+from .eip import ensure_instance_public_network, get_eip_public_ip_map, release_instance_public_network
+from utils.wait_until import WaitUntilTimeoutError, wait_until
     
 
 def _instance_tags(cfg: InstanceConfig) -> List[RunInstancesRequestTag]:
@@ -32,6 +35,7 @@ def as_instance_info_with_tag(rep: DescribeInstancesResponseBodyInstancesInstanc
 
 def create_instances_in_zone(
     client: Client,
+    vpc_client: VpcClient,
     cfg: InstanceConfig,
     region_info: RegionInfo,
     zone_info: ZoneInfo,
@@ -51,8 +55,8 @@ def create_instances_in_zone(
         v_switch_id=zone_info.v_switch_id,
         key_pair_name=region_info.key_pair_name,
         instance_name=name,
-        internet_max_bandwidth_out=cfg.internet_max_bandwidth_out,
-        internet_charge_type="PayByTraffic",
+        internet_max_bandwidth_out=0 if cfg.use_aliyun_eip else cfg.internet_max_bandwidth_out,
+        internet_charge_type=cfg.aliyun_eip_internet_charge_type if cfg.use_aliyun_eip else "PayByTraffic",
         instance_charge_type="PostPaid",
         tag=_instance_tags(cfg),
         amount=max_amount,
@@ -64,6 +68,18 @@ def create_instances_in_zone(
         resp = client.run_instances(req)
         ids = resp.body.instance_id_sets.instance_id_set
         assert ids is not None
+        if cfg.use_aliyun_eip:
+            try:
+                _wait_for_instances_ready_for_eip(client, region_info.id, ids)
+                ensure_instance_public_network(vpc_client, region_info.id, cfg, ids)
+            except Exception:
+                logger.error(f"Failed to provision Aliyun EIPs for {region_info.id}/{zone_info.id}, rolling back instances {ids}")
+                logger.error(traceback.format_exc())
+                try:
+                    release_instance_public_network(vpc_client, region_info.id, ids)
+                finally:
+                    delete_instances(client, vpc_client, region_info.id, ids)
+                return [], CreateInstanceError.Others
         logger.success(f"Create instances at {region_info.id}/{zone_info.id}: instance_type={instance_type.name}, amount={len(ids)}, ids={ids}")
         # ids = resp.body.instance_id_sets.instance_id_set if resp.body and resp.body.instance_id_sets else []
         return ids, CreateInstanceError.Nil
@@ -84,13 +100,30 @@ def create_instances_in_zone(
             logger.error(traceback.format_exc())
         
         return [], error_type
+
+
+def _wait_for_instances_ready_for_eip(client: Client, region_id: str, instance_ids: list[str]):
+    def _all_ready() -> bool:
+        resp = client.describe_instances(
+            DescribeInstancesRequest(region_id=region_id, page_size=100, instance_ids=json.dumps(instance_ids))
+        )
+        instances = resp.body.instances.instance
+        ready_statuses = {"Running", "Stopped"}
+        current_status = {instance.instance_id: instance.status for instance in instances}
+        return len(current_status) == len(instance_ids) and all(status in ready_statuses for status in current_status.values())
+
+    try:
+        wait_until(_all_ready, timeout=300, retry_interval=3)
+    except WaitUntilTimeoutError as exc:
+        raise RuntimeError(f"Instances are not ready for EIP association in {region_id}: {instance_ids}") from exc
     
-def describe_instance_status(client: Client, region_id: str, instance_ids: List[str]):
+def describe_instance_status(client: Client, vpc_client: VpcClient, region_id: str, instance_ids: List[str]):
     running_instances = dict()
     pending_instances = set()
     
     for i in range(0, len(instance_ids), 100):
         query_chunk = instance_ids[i: i+100]
+        eip_ip_map = get_eip_public_ip_map(vpc_client, region_id, query_chunk)
         
         rep = client.describe_instances(DescribeInstancesRequest(
             region_id=region_id, page_size=100, instance_ids=json.dumps(query_chunk)))
@@ -99,9 +132,24 @@ def describe_instance_status(client: Client, region_id: str, instance_ids: List[
         for instance in instance_status:
             if instance.status not in ["Running"]:
                 continue
-            public_ip = instance.public_ip_address.ip_address[0]
-            private_ip = instance.vpc_attributes.private_ip_address.ip_address[0] or instance.inner_ip_address.ip_address[0]
-            running_instances[instance.instance_id] = (public_ip, private_ip)
+            instance_id = instance.instance_id
+            if not instance_id:
+                continue
+            public_ips = instance.public_ip_address.ip_address if instance.public_ip_address and instance.public_ip_address.ip_address else []
+            private_ips = instance.vpc_attributes.private_ip_address.ip_address if instance.vpc_attributes and instance.vpc_attributes.private_ip_address and instance.vpc_attributes.private_ip_address.ip_address else []
+            inner_ips = instance.inner_ip_address.ip_address if instance.inner_ip_address and instance.inner_ip_address.ip_address else []
+
+            public_ip = public_ips[0] if public_ips else eip_ip_map.get(instance_id)
+
+            if not public_ip:
+                pending_instances.add(instance_id)
+                continue
+            if not private_ips and not inner_ips:
+                pending_instances.add(instance_id)
+                continue
+
+            private_ip = (private_ips or inner_ips)[0]
+            running_instances[instance_id] = (public_ip, private_ip)
         
         # 阿里云启动阶段也可能读到 instance 是 stopped 的状态
         pending_instances.update({i.instance_id for i in instance_status if i.status in [
@@ -124,7 +172,16 @@ def get_instances_with_tag(client: Client, region_id: str) -> List[InstanceInfoW
         
     return instances
 
-def delete_instances(client: Client, region_id: str, instances_ids: List[str]):
+def delete_instances(
+    client: Client,
+    vpc_client: VpcClient,
+    region_id: str,
+    instances_ids: List[str],
+    *,
+    release_public_network: bool = True,
+):
+    if release_public_network:
+        release_instance_public_network(vpc_client, region_id, instances_ids)
     for i in range(0, len(instances_ids), 100):
         chunks = instances_ids[i:i+100]
         while True: 

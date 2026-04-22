@@ -126,7 +126,7 @@ if __name__ == "__main__":
     logger.success("开始运行区块链系统")
     success_complete = False
     try:
-        generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=100)
+        generate_blocks_async(nodes, simulation_config.num_blocks, node_config.max_block_size_in_bytes, simulation_config.generation_period_ms, min_node_interval_ms=min(100, num_target_nodes * 10))
         success_complete = True
     except Exception as exc:
         logger.warning(f"出块过程出现异常: {exc}")

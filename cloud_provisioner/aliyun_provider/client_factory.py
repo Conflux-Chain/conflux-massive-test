@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import os
 from typing import List, Optional, Tuple
 from alibabacloud_ecs20140526.client import Client as EcsClient
+from alibabacloud_vpc20160428.client import Client as VpcClient
 from alibabacloud_tea_openapi.models import Config as AliyunConfig
 
 from .image import get_images_in_region
@@ -39,14 +40,26 @@ class AliyunClient(IEcsClient):
                 connect_timeout=120_000
             )
         )
+
+    def build_vpc(self, region_id: str) -> VpcClient:
+        return VpcClient(
+            AliyunConfig(
+                access_key_id=self.access_key_id,
+                access_key_secret=self.access_key_secret,
+                region_id=region_id,
+                read_timeout=120_000,
+                connect_timeout=120_000,
+            )
+        )
         
     def get_zone_ids_in_region(self, region_id: str) -> List[str]:
         client = self.build(region_id)
         return get_zone_ids_in_region(client, region_id)
         
     def describe_instance_status(self, region_id: str, instance_ids: List[str]) -> InstanceStatus:
-        client = self.build(region_id)
-        return describe_instance_status(client, region_id, instance_ids)
+        ecs_client = self.build(region_id)
+        vpc_client = self.build_vpc(region_id)
+        return describe_instance_status(ecs_client, vpc_client, region_id, instance_ids)
     
     def get_instances_with_tag(self, region_id: str) -> List[InstanceInfoWithTag]:
         client = self.build(region_id)
@@ -81,12 +94,20 @@ class AliyunClient(IEcsClient):
         max_amount: int,
         min_amount: int,
     ) -> Tuple[list[str], CreateInstanceError]:
-        client = self.build(region_info.id)
-        return create_instances_in_zone(client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
+        ecs_client = self.build(region_info.id)
+        vpc_client = self.build_vpc(region_info.id)
+        return create_instances_in_zone(ecs_client, vpc_client, cfg, region_info, zone_info, instance_type, max_amount, min_amount)
     
-    def delete_instances(self, region_id: str, instances_ids: List[str]):
-        client = self.build(region_id)
-        return delete_instances(client, region_id, instances_ids)
+    def delete_instances(self, region_id: str, instances_ids: List[str], *, release_public_network: bool = True):
+        ecs_client = self.build(region_id)
+        vpc_client = self.build_vpc(region_id)
+        return delete_instances(
+            ecs_client,
+            vpc_client,
+            region_id,
+            instances_ids,
+            release_public_network=release_public_network,
+        )
         
     def create_keypair(self, region_id: str, key_pair: KeyPairRequestConfig):
         client = self.build(region_id)

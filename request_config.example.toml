@@ -7,6 +7,7 @@ default_user_name = "root"
 user_tag = "lichenxing-alpha-5"
 image_name = "conflux-docker-registry"
 ssh_key_path = "./keys/ssh-key.pem"
+use_eip = true
 
 [[aliyun.regions]]
 # 新加坡

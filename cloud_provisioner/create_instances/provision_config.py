@@ -37,8 +37,13 @@ class CloudConfig(BaseModel):
         else:
             return self.user_tag
 
+
+class AliyunCloudConfig(CloudConfig):
+    use_eip: bool = True
+
+
 class ProvisionConfig(BaseModel):
-    aliyun: CloudConfig
+    aliyun: AliyunCloudConfig
     aws: CloudConfig
     tencent: CloudConfig
 
