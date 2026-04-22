@@ -1,7 +1,10 @@
 # pyright: reportTypedDictNotRequiredAccess=false
 
 from typing import List
+from botocore.exceptions import ClientError
 from ..create_instances.types import VSwitchInfo
+from ..create_instances.types import ZoneUnavailableError
+from .zone_unavailable import is_zone_unavailable_error
 from utils.wait_until import wait_until
 
 from mypy_boto3_ec2.client import EC2Client
@@ -57,19 +60,24 @@ def get_v_switchs_in_region(client: EC2Client, vpc_id: str) -> List[VSwitchInfo]
 
 
 def create_v_switch(client: EC2Client, zone_id: str, vpc_id: str, v_switch_name: str, cidr_block: str):
-    response = client.create_subnet(
-        VpcId=vpc_id,
-        CidrBlock=cidr_block,
-        AvailabilityZone=zone_id,
-        TagSpecifications=[
-            {
-                'ResourceType': 'subnet',
-                'Tags': [
-                    {'Key': 'Name', 'Value': v_switch_name}
-                ]
-            }
-        ]
-    )
+    try:
+        response = client.create_subnet(
+            VpcId=vpc_id,
+            CidrBlock=cidr_block,
+            AvailabilityZone=zone_id,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'subnet',
+                    'Tags': [
+                        {'Key': 'Name', 'Value': v_switch_name}
+                    ]
+                }
+            ]
+        )
+    except ClientError as exc:
+        if is_zone_unavailable_error(exc):
+            raise ZoneUnavailableError(zone_id, str(exc)) from exc
+        raise
     
     subnet_id = response['Subnet']['SubnetId']
     

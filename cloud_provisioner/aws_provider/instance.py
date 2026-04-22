@@ -11,6 +11,7 @@ from cloud_provisioner.cleanup_instances.types import InstanceInfoWithTag
 
 from ..create_instances.types import CreateInstanceError, InstanceStatus, RegionInfo, ZoneInfo, InstanceType
 from ..create_instances.instance_config import InstanceConfig, DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE
+from .zone_unavailable import is_zone_unavailable_error
 
 from mypy_boto3_ec2.client import EC2Client
 
@@ -99,6 +100,10 @@ def create_instances_in_zone(
         elif code == "Unsupported":
             logger.warning(f"Unsupported configuration for {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}")
             error_type = CreateInstanceError.NoInstanceType
+
+        elif is_zone_unavailable_error(exc):
+            logger.warning(f"Skip unavailable zone {region_info.id}/{zone_info.id}, instance_type={instance_type.name}, amount={min_amount}~{max_amount}: {exc}")
+            error_type = CreateInstanceError.ZoneUnavailable
             
         else:
             logger.error(f"run_instances failed for {region_info.id}/{zone_info.id}: {exc}")

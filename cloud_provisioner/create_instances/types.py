@@ -31,7 +31,14 @@ class CreateInstanceError(Enum):
     Nil = 0
     NoStock = 1
     NoInstanceType = 2
+    ZoneUnavailable = 3
     Others = 99
+
+
+class ZoneUnavailableError(RuntimeError):
+    def __init__(self, zone_id: str, message: str):
+        super().__init__(message)
+        self.zone_id = zone_id
     
 @dataclass(frozen=True)
 class Instance:
