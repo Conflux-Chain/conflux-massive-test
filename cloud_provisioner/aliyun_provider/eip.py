@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Callable, Iterable, Optional, TypeVar
 
+from alibabacloud_tea_openapi.exceptions._throttling import ThrottlingException
+from darabonba.exceptions import UnretryableException
 from Tea.exceptions import TeaException
 from alibabacloud_vpc20160428.client import Client as VpcClient
 from alibabacloud_vpc20160428.models import AllocateEipAddressRequest, AllocateEipAddressRequestTag, AssociateEipAddressRequest, DescribeEipAddressesRequest, ReleaseEipAddressRequest, UnassociateEipAddressRequest
@@ -114,6 +116,8 @@ def _extract_eip_error_code(exc: Exception) -> str:
 
 
 def _is_retryable_eip_exception(exc: Exception) -> bool:
+    if isinstance(exc, (ThrottlingException, UnretryableException)):
+        return True
     if isinstance(exc, (ConnectionError, TimeoutError)):
         return True
 
