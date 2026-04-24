@@ -38,7 +38,8 @@ class InfraRequest:
             key_pair_name = f"cfx_test_{config.get_key_pair_tag()}"
         else:
             key_pair_name = infra_tag
-        return InfraRequest(region_ids=[r.name for r in config.regions],
+        active_region_ids = [region.name for region in config.regions if region.count > 0]
+        return InfraRequest(region_ids=active_region_ids,
                             provider=config.provider,
                             vpc_name=infra_tag,
                             v_switch_name=infra_tag,
@@ -49,7 +50,8 @@ class InfraRequest:
                             )
 
     def ensure_infras(self, client: IEcsClient) -> InfraProvider:
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        max_workers = min(max(1, len(self.region_ids)), 16)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             regions = list(executor.map(lambda region_id: self._ensure_region(
                 client, region_id), self.region_ids))
 

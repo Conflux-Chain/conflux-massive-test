@@ -22,6 +22,7 @@ class CloudConfig(BaseModel):
     user_tag: str
     image_name: str
     ssh_key_path: str
+    use_eip: bool = False
     # 专用于腾讯云，因为对 key_pair 有长度限制，其他云不生效
     key_pair_tag: Optional[str] = None
     regions: List[ProvisionRegionConfig] = []
