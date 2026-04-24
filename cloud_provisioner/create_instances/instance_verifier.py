@@ -69,6 +69,10 @@ def _summarize_instance_ids(instance_ids: Set[str], *, sample_size: int = 8) -> 
     return f"count={len(instance_ids)}, sample=[{sample}, ...]"
 
 
+class RegionProvisioningTimeoutError(RuntimeError):
+    pass
+
+
 class InstanceVerifier:
     region_id: str
     target_nodes: int
