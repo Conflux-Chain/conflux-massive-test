@@ -29,6 +29,8 @@ AWS_REGIONS = [
     "sa-east-1",   # São Paulo
     "af-south-1",  # Cape Town
     "me-south-1",  # Bahrain
+    "ap-southeast-6",  # New Zealand
+    "eu-south-1",  # Milan
 ]
 TENCENT_REGIONS = [
     "ap-hongkong",
