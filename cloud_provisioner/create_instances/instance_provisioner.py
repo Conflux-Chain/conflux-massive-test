@@ -12,7 +12,24 @@ from ..provider_interface import IEcsClient
 from .types import CreateInstanceError, InstanceType, RegionInfo, ZoneInfo
 from cloud_provisioner.host_spec import HostSpec
 
-from .instance_verifier import InstanceVerifier
+from .instance_verifier import InstanceVerifier, RegionProvisioningTimeoutError
+
+
+def _wait_for_region_progress(
+    verifier: InstanceVerifier,
+    region_id: str,
+    *,
+    wait_for_pendings: bool = False,
+) -> int | None:
+    try:
+        return verifier.get_rest_nodes(wait_for_pendings=wait_for_pendings)
+    except RegionProvisioningTimeoutError as exc:
+        logger.error(
+            f"Region {region_id} provisioning stalled, returning partial success: "
+            f"ready_nodes={verifier.ready_nodes}, pending_nodes={verifier.pending_nodes}, "
+            f"wait_for_pendings={wait_for_pendings}, error={exc}"
+        )
+        return None
 
 
 def _next_zone_plan_candidate(zone_plan, blocked_zone_ids: set[str]):
@@ -62,7 +79,9 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
     instance_type, zone_info = _next_zone_plan_candidate(zone_plan, blocked_zone_ids)
 
     while True:
-        rest_nodes = verifier.get_rest_nodes()
+        rest_nodes = _wait_for_region_progress(verifier, region_info.id)
+        if rest_nodes is None:
+            break
         if rest_nodes <= 0:
             logger.success(f"Region {region_info.id} launch complete")
             break
@@ -88,7 +107,14 @@ def create_instances_in_region(client: IEcsClient, cfg: InstanceConfig, provisio
                 instance_type, zone_info = _next_zone_plan_candidate(zone_plan, blocked_zone_ids)
             except StopIteration:
                 # 全部实例组合耗尽，等待 pending 的结果
-                rest_nodes = verifier.get_rest_nodes(wait_for_pendings=True)
+                rest_nodes = _wait_for_region_progress(
+                    verifier,
+                    region_info.id,
+                    wait_for_pendings=True,
+                )
+
+                if rest_nodes is None:
+                    break
 
                 if rest_nodes > 0:
                     logger.error(

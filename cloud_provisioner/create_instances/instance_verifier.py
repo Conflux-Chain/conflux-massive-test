@@ -17,6 +17,10 @@ from utils.wait_until import WaitUntilTimeoutError, wait_until
 SSH_CHECK_POOL = ThreadPoolExecutor(max_workers=2000)
 
 
+class RegionProvisioningTimeoutError(RuntimeError):
+    pass
+
+
 class InstanceVerifier:
     region_id: str
     target_nodes: int
@@ -82,7 +86,7 @@ class InstanceVerifier:
             # 剩下的情况里，ready 不满足，但 ready + pending 满足，或者 wait_for_pendings 是 true，需要等待 pending 的结果
             normal = self._event.wait(timeout=180)
             if not normal:
-                raise Exception(
+                raise RegionProvisioningTimeoutError(
                     f"Region {self.region_id} wait for event timeout")
 
     def describe_instances_loop(self, client: IEcsClient, check_interval: float = 3.0):
