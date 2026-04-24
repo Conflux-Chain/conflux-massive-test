@@ -99,6 +99,16 @@ count = 10
 name = "sa-east-1"
 # count = 10
 
+[[aws.regions]]
+# 新西兰
+name = "ap-southeast-6"
+count = 0
+
+[[aws.regions]]
+# 米兰
+name = "eu-south-1"
+count = 0
+
 [[aws.instance_types]]
 name = "m6i.2xlarge"
 nodes = 1
