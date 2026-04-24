@@ -1,16 +1,40 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Iterable, List, Optional
+from dataclasses import dataclass
+from typing import Callable, Iterable, Optional
 
 from alibabacloud_vpc20160428.client import Client as VpcClient
 from alibabacloud_vpc20160428.models import AllocateEipAddressRequest, AllocateEipAddressRequestTag, AssociateEipAddressRequest, DescribeEipAddressesRequest, ReleaseEipAddressRequest, UnassociateEipAddressRequest
 from loguru import logger
 
 from ..create_instances.instance_config import DEFAULT_COMMON_TAG_KEY, DEFAULT_COMMON_TAG_VALUE, DEFAULT_USER_TAG_KEY, InstanceConfig
-from utils.wait_until import WaitUntilTimeoutError, wait_until
 
 ECS_INSTANCE_TYPE = "EcsInstance"
 MAX_PARALLEL_EIP_OPS = 16
+EIP_DESCRIBE_PAGE_SIZE = 100
+EIP_MAX_ALLOCATION_IDS_PER_DESCRIBE = 50
+EIP_WAIT_TIMEOUT_SECONDS = 120
+EIP_WAIT_RETRY_INTERVAL_SECONDS = 2
+
+
+def _chunked(values: Iterable[str], chunk_size: int):
+    chunk: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        chunk.append(value)
+        if len(chunk) == chunk_size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+@dataclass(frozen=True)
+class _EnsureInstanceEipResult:
+    instance_id: str
+    allocation_id: str
+    association_pending: bool
 
 
 def _eip_name(cfg: InstanceConfig, instance_id: str) -> str:
@@ -72,7 +96,7 @@ def _describe_eips(vpc_client: VpcClient, region_id: str, *, allocation_id: Opti
         request_kwargs = {
             "region_id": region_id,
             "page_number": page_number,
-            "page_size": 50,
+            "page_size": EIP_DESCRIBE_PAGE_SIZE,
         }
         if allocation_id is not None:
             request_kwargs["allocation_id"] = allocation_id
@@ -88,17 +112,83 @@ def _describe_eips(vpc_client: VpcClient, region_id: str, *, allocation_id: Opti
         results.extend(eips)
 
         total_count = resp.body.total_count or 0
-        if total_count <= page_number * 50:
+        if total_count <= page_number * EIP_DESCRIBE_PAGE_SIZE:
             return results
         page_number += 1
-def _get_eip_by_allocation_id(vpc_client: VpcClient, region_id: str, allocation_id: str):
-    eips = _describe_eips(vpc_client, region_id, allocation_id=allocation_id)
-    return eips[0] if eips else None
 
 
-def _get_instance_eip(vpc_client: VpcClient, region_id: str, instance_id: str):
-    eips = _describe_eips(vpc_client, region_id, associated_instance_id=instance_id)
-    return eips[0] if eips else None
+def _describe_eips_by_allocation_ids(vpc_client: VpcClient, region_id: str, allocation_ids: Iterable[str]) -> dict[str, object]:
+    eips_by_allocation_id: dict[str, object] = {}
+    for chunk in _chunked(dict.fromkeys(allocation_ids), EIP_MAX_ALLOCATION_IDS_PER_DESCRIBE):
+        eips = _describe_eips(vpc_client, region_id, allocation_id=",".join(chunk))
+        for eip in eips:
+            current_allocation_id = getattr(eip, "allocation_id", None)
+            if current_allocation_id:
+                eips_by_allocation_id[current_allocation_id] = eip
+    return eips_by_allocation_id
+
+
+def _poll_eips(
+    vpc_client: VpcClient,
+    region_id: str,
+    allocation_ids: Iterable[str],
+    pending_builder: Callable[[dict[str, object]], list[str]],
+) -> tuple[dict[str, object], list[str]]:
+    tracked_ids = list(dict.fromkeys(allocation_ids))
+    if not tracked_ids:
+        return {}, []
+
+    deadline = time.monotonic() + EIP_WAIT_TIMEOUT_SECONDS
+    while True:
+        current = _describe_eips_by_allocation_ids(vpc_client, region_id, tracked_ids)
+        pending = pending_builder(current)
+        if not pending or time.monotonic() >= deadline:
+            return current, pending
+        time.sleep(min(EIP_WAIT_RETRY_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+
+
+def _wait_for_eip_associations(vpc_client: VpcClient, region_id: str, allocation_to_instance: dict[str, str]):
+    current, pending = _poll_eips(
+        vpc_client,
+        region_id,
+        allocation_to_instance.keys(),
+        lambda observed: [
+            f"{allocation_id}->{instance_id}"
+            for allocation_id, instance_id in allocation_to_instance.items()
+            if getattr(observed.get(allocation_id), "instance_id", None) != instance_id
+        ],
+    )
+    if pending:
+        raise RuntimeError(
+            f"Timeout waiting for Aliyun EIPs to associate in {region_id}: {pending}"
+        )
+    return current
+
+
+def _eip_is_releasable(eip) -> bool:
+    return (
+        eip is not None
+        and not getattr(eip, "instance_id", None)
+        and getattr(eip, "status", None) == "Available"
+    )
+
+
+def _wait_for_eips_releasable(vpc_client: VpcClient, region_id: str, eips: Iterable[object]):
+    allocation_ids: list[str] = []
+    for eip in eips:
+        allocation_id = getattr(eip, "allocation_id", None)
+        if allocation_id:
+            allocation_ids.append(allocation_id)
+    return _poll_eips(
+        vpc_client,
+        region_id,
+        allocation_ids,
+        lambda observed: [
+            allocation_id
+            for allocation_id in allocation_ids
+            if not _eip_is_releasable(observed.get(allocation_id))
+        ],
+    )
 
 
 def _collect_relevant_eips(
@@ -178,6 +268,37 @@ def _release_eips_in_parallel(
 
     max_workers = min(MAX_PARALLEL_EIP_OPS, len(target_eips))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        prepared = list(executor.map(
+            lambda eip: _request_eip_release_preparation(
+                vpc_client,
+                region_id,
+                eip,
+                context_builder(eip),
+            ),
+            target_eips,
+        ))
+
+    prepared_eips = [eip for eip, ok in zip(target_eips, prepared) if ok]
+    if not prepared_eips:
+        return 0
+
+    current, pending = _wait_for_eips_releasable(vpc_client, region_id, prepared_eips)
+    if pending:
+        logger.warning(f"Timeout waiting for Aliyun EIPs to become releasable in {region_id}: {pending}")
+
+    releasable_ids = {
+        allocation_id
+        for allocation_id, eip in current.items()
+        if _eip_is_releasable(eip)
+    }
+    releasable_eips = [
+        eip for eip in prepared_eips
+        if getattr(eip, "allocation_id", None) in releasable_ids
+    ]
+    if not releasable_eips:
+        return 0
+
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_EIP_OPS, len(releasable_eips))) as executor:
         results = list(executor.map(
             lambda eip: _release_eip_resource(
                 vpc_client,
@@ -185,7 +306,7 @@ def _release_eips_in_parallel(
                 eip,
                 context_builder(eip),
             ),
-            target_eips,
+            releasable_eips,
         ))
     return sum(1 for released in results if released)
 
@@ -202,7 +323,7 @@ def get_eip_public_ip_map(vpc_client: VpcClient, region_id: str, instance_ids: I
             DescribeEipAddressesRequest(
                 region_id=region_id,
                 page_number=page_number,
-                page_size=50,
+                page_size=EIP_DESCRIBE_PAGE_SIZE,
             )
         )
         eips = resp.body.eip_addresses.eip_address or []
@@ -211,30 +332,11 @@ def get_eip_public_ip_map(vpc_client: VpcClient, region_id: str, instance_ids: I
                 mapping[eip.instance_id] = eip.ip_address
 
         total_count = resp.body.total_count or 0
-        if total_count <= page_number * 50 or len(mapping) == len(target_ids):
+        if total_count <= page_number * EIP_DESCRIBE_PAGE_SIZE or len(mapping) == len(target_ids):
             return mapping
         page_number += 1
 
 
-def _wait_for_eip(vpc_client: VpcClient, region_id: str, allocation_id: str, predicate, description: str):
-    try:
-        wait_until(
-            lambda: predicate(_get_eip_by_allocation_id(vpc_client, region_id, allocation_id)),
-            timeout=120,
-            retry_interval=2,
-        )
-    except WaitUntilTimeoutError as exc:
-        raise RuntimeError(f"Timeout waiting for EIP {allocation_id}: {description}") from exc
-
-
-def _wait_for_eip_status(vpc_client: VpcClient, region_id: str, allocation_id: str, statuses: set[str], description: str):
-    _wait_for_eip(
-        vpc_client,
-        region_id,
-        allocation_id,
-        lambda eip: eip is not None and eip.status in statuses,
-        description,
-    )
 def _allocate_eip(vpc_client: VpcClient, region_id: str, cfg: InstanceConfig, instance_id: str) -> str:
     req = AllocateEipAddressRequest(
         region_id=region_id,
@@ -262,21 +364,17 @@ def _ensure_instance_eip(
     *,
     current_eip=None,
     named_eip=None,
-) -> str:
-    current = current_eip if current_eip is not None else _get_instance_eip(vpc_client, region_id, instance_id)
+) -> _EnsureInstanceEipResult:
+    current = current_eip
     if current is not None:
-        return current.allocation_id
+        return _EnsureInstanceEipResult(instance_id, current.allocation_id, False)
 
     created_now = False
     if named_eip is not None:
         allocation_id = named_eip.allocation_id
     else:
-        existing_by_name = _describe_eips(vpc_client, region_id, eip_name=_eip_name(cfg, instance_id))
-        if existing_by_name:
-            allocation_id = existing_by_name[0].allocation_id
-        else:
-            allocation_id = _allocate_eip(vpc_client, region_id, cfg, instance_id)
-            created_now = True
+        allocation_id = _allocate_eip(vpc_client, region_id, cfg, instance_id)
+        created_now = True
 
     try:
         vpc_client.associate_eip_address(
@@ -297,15 +395,8 @@ def _ensure_instance_eip(
                 logger.warning(f"Failed to release EIP {allocation_id} after associate error: {release_exc}")
         raise
 
-    _wait_for_eip(
-        vpc_client,
-        region_id,
-        allocation_id,
-        lambda eip: eip is not None and eip.instance_id == instance_id,
-        f"association to instance {instance_id}",
-    )
-    logger.info(f"Associated Aliyun EIP {allocation_id} with instance {instance_id} in {region_id}")
-    return allocation_id
+    logger.info(f"Requested Aliyun EIP association {allocation_id} -> {instance_id} in {region_id}")
+    return _EnsureInstanceEipResult(instance_id, allocation_id, True)
 def ensure_instance_public_network(vpc_client: VpcClient, region_id: str, cfg: InstanceConfig, instance_ids: Iterable[str]) -> list[str]:
     if not cfg.use_aliyun_eip:
         return []
@@ -323,7 +414,7 @@ def ensure_instance_public_network(vpc_client: VpcClient, region_id: str, cfg: I
 
     max_workers = min(MAX_PARALLEL_EIP_OPS, len(unique_instance_ids))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        allocation_ids = list(executor.map(
+        results = list(executor.map(
             lambda instance_id: _ensure_instance_eip(
                 vpc_client,
                 region_id,
@@ -335,22 +426,17 @@ def ensure_instance_public_network(vpc_client: VpcClient, region_id: str, cfg: I
             unique_instance_ids,
         ))
 
-    refreshed_eips_by_instance, _ = _collect_relevant_eips(
-        vpc_client,
-        region_id,
-        cfg,
-        unique_instance_ids,
-    )
-    missing_instances = [
-        instance_id for instance_id in unique_instance_ids
-        if instance_id not in refreshed_eips_by_instance
-    ]
-    if missing_instances:
-        raise RuntimeError(
-            f"Cannot find Aliyun EIPs after association in {region_id}: {missing_instances}"
-        )
+    pending_associations = {
+        result.allocation_id: result.instance_id
+        for result in results
+        if result.association_pending
+    }
+    if pending_associations:
+        _wait_for_eip_associations(vpc_client, region_id, pending_associations)
+        for allocation_id, instance_id in pending_associations.items():
+            logger.info(f"Associated Aliyun EIP {allocation_id} with instance {instance_id} in {region_id}")
 
-    return allocation_ids
+    return [result.allocation_id for result in results]
 
 
 def _release_eip_resource(vpc_client: VpcClient, region_id: str, eip, context: str) -> bool:
@@ -359,32 +445,6 @@ def _release_eip_resource(vpc_client: VpcClient, region_id: str, eip, context: s
         return False
 
     try:
-        if eip.instance_id:
-            vpc_client.unassociate_eip_address(
-                UnassociateEipAddressRequest(
-                    region_id=region_id,
-                    allocation_id=allocation_id,
-                    instance_id=eip.instance_id,
-                    instance_type=ECS_INSTANCE_TYPE,
-                    force=True,
-                )
-            )
-            _wait_for_eip(
-                vpc_client,
-                region_id,
-                allocation_id,
-                lambda current: current is not None and not current.instance_id,
-                f"unassociation from {context}",
-            )
-        else:
-            _wait_for_eip_status(
-                vpc_client,
-                region_id,
-                allocation_id,
-                {"Available"},
-                f"become releasable for {context}",
-            )
-
         vpc_client.release_eip_address(
             ReleaseEipAddressRequest(region_id=region_id, allocation_id=allocation_id)
         )
@@ -392,6 +452,31 @@ def _release_eip_resource(vpc_client: VpcClient, region_id: str, eip, context: s
         return True
     except Exception as exc:
         logger.warning(f"Failed to release Aliyun EIP {allocation_id} in {region_id} for {context}: {exc}")
+        return False
+
+
+def _request_eip_release_preparation(vpc_client: VpcClient, region_id: str, eip, context: str) -> bool:
+    allocation_id = getattr(eip, "allocation_id", None)
+    if not allocation_id:
+        return False
+
+    instance_id = getattr(eip, "instance_id", None)
+    if not instance_id:
+        return True
+
+    try:
+        vpc_client.unassociate_eip_address(
+            UnassociateEipAddressRequest(
+                region_id=region_id,
+                allocation_id=allocation_id,
+                instance_id=instance_id,
+                instance_type=ECS_INSTANCE_TYPE,
+                force=True,
+            )
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"Failed to unassociate Aliyun EIP {allocation_id} in {region_id} for {context}: {exc}")
         return False
 
 
