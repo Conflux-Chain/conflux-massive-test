@@ -55,6 +55,15 @@ _UNASSOCIATE_EIP_RATE_LIMITER = _SlidingWindowRateLimiter(
     EIP_UNASSOCIATE_MAX_CALLS,
     EIP_UNASSOCIATE_WINDOW_SECONDS,
 )
+EIP_TRANSIENT_RETRY_ATTEMPTS = 6
+EIP_TRANSIENT_RETRY_BASE_SECONDS = 1.0
+EIP_TRANSIENT_RETRY_MAX_SECONDS = 10.0
+EIP_TRANSIENT_RETRY_CODES = {
+    "Throttling",
+    "Throttling.User",
+    "RequestThrottled",
+    "ServiceBusy",
+}
 
 
 def _chunked(values: Iterable[str], chunk_size: int):
@@ -68,6 +77,49 @@ def _chunked(values: Iterable[str], chunk_size: int):
             chunk = []
     if chunk:
         yield chunk
+
+
+def _exception_code(exc: Exception) -> Optional[str]:
+    code = getattr(exc, "code", None)
+    if code:
+        return str(code)
+
+    data = getattr(exc, "data", None)
+    if isinstance(data, dict):
+        raw_code = data.get("Code") or data.get("code")
+        if raw_code:
+            return str(raw_code)
+
+    return None
+
+
+def _is_retryable_eip_exception(exc: Exception) -> bool:
+    code = _exception_code(exc)
+    if code in EIP_TRANSIENT_RETRY_CODES:
+        return True
+
+    message = str(exc)
+    return "Request was denied due to user flow control" in message or "Throttling" in message
+
+
+def _call_eip_with_retry(action: str, func):
+    for attempt in range(1, EIP_TRANSIENT_RETRY_ATTEMPTS + 1):
+        try:
+            return func()
+        except Exception as exc:
+            if not _is_retryable_eip_exception(exc) or attempt >= EIP_TRANSIENT_RETRY_ATTEMPTS:
+                raise
+
+            sleep_seconds = min(
+                EIP_TRANSIENT_RETRY_MAX_SECONDS,
+                EIP_TRANSIENT_RETRY_BASE_SECONDS * attempt,
+            )
+            logger.warning(
+                f"{action} throttled, retrying in {sleep_seconds:.1f}s "
+                f"({attempt}/{EIP_TRANSIENT_RETRY_ATTEMPTS}): {exc}"
+            )
+            time.sleep(sleep_seconds)
+    raise RuntimeError(f"{action} failed after {EIP_TRANSIENT_RETRY_ATTEMPTS} attempts due to repeated throttling")
 
 
 @dataclass(frozen=True)
@@ -388,7 +440,10 @@ def _allocate_eip(vpc_client: VpcClient, region_id: str, cfg: InstanceConfig, in
         instance_charge_type="PostPaid",
         tag=_eip_tags(cfg),
     )
-    resp = vpc_client.allocate_eip_address(req)
+    resp = _call_eip_with_retry(
+        f"Allocate Aliyun EIP for {instance_id} in {region_id}",
+        lambda: vpc_client.allocate_eip_address(req),
+    )
     allocation_id = resp.body.allocation_id
     if not allocation_id:
         raise RuntimeError(f"Aliyun EIP allocation returned empty allocation id for {instance_id} in {region_id}")
@@ -417,13 +472,15 @@ def _ensure_instance_eip(
         created_now = True
 
     try:
-        vpc_client.associate_eip_address(
-            AssociateEipAddressRequest(
-                region_id=region_id,
-                allocation_id=allocation_id,
-                instance_id=instance_id,
-                instance_type=ECS_INSTANCE_TYPE,
-            )
+        associate_request = AssociateEipAddressRequest(
+            region_id=region_id,
+            allocation_id=allocation_id,
+            instance_id=instance_id,
+            instance_type=ECS_INSTANCE_TYPE,
+        )
+        _call_eip_with_retry(
+            f"Associate Aliyun EIP {allocation_id} -> {instance_id} in {region_id}",
+            lambda: vpc_client.associate_eip_address(associate_request),
         )
     except Exception:
         if created_now:
