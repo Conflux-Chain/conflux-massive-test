@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+modprobe tcp_bbr
+sysctl -w net.core.default_qdisc=fq
+sysctl -w net.ipv4.tcp_congestion_control=bbr
+
 set -euo pipefail
 
 REGISTRY_HOST="${1:?registry host is required}"
