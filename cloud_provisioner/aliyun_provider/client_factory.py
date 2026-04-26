@@ -8,7 +8,7 @@ from .image import get_images_in_region
 from .key_pair import create_keypair, get_keypairs_in_region
 from .security_group import create_security_group, get_security_groups_in_region
 from .v_switch import create_v_switch, get_v_switchs_in_region
-from .vpc import create_vpc, get_vpcs_in_region
+from .vpc import create_vpc, get_vpcs_in_region, delete_vpc
 from .zone import get_zone_ids_in_region
 from .instance import create_instances_in_zone, delete_instances, describe_instance_status, get_instances_with_tag
 
@@ -103,3 +103,7 @@ class AliyunClient(IEcsClient):
     def create_vpc(self, region_id: str, vpc_name: str, cidr_block: str):
         client = self.build(region_id)
         return create_vpc(client, region_id, vpc_name, cidr_block)
+
+    def delete_vpc(self, region_id: str, vpc_id: str):
+        client = self.build(region_id)
+        return delete_vpc(client, region_id, vpc_id)
