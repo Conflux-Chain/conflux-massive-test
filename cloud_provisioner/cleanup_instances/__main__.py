@@ -196,8 +196,8 @@ if __name__ == "__main__":
         futures = [
             executor.submit(delete_instances, aliyun_client, ALI_REGIONS, predicate=predicate),
             executor.submit(cleanup_aliyun_eips, aliyun_client, ALI_REGIONS, user_prefix),
-            # executor.submit(delete_instances, aws_client, AWS_REGIONS, predicate=predicate),
-            # executor.submit(delete_instances, tencent_client, TENCENT_REGIONS, predicate=predicate),
+            executor.submit(delete_instances, aws_client, AWS_REGIONS, predicate=predicate),
+            executor.submit(delete_instances, tencent_client, TENCENT_REGIONS, predicate=predicate),
         ]
         from concurrent.futures import wait
 
