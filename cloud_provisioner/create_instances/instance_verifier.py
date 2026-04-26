@@ -1,102 +1,23 @@
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import copy
-import os
 import queue
-import socket
-import time
-import threading
-from typing import Dict, List, Set, Tuple
 from queue import Queue
+import threading
+import time
+from typing import Dict, List, Set, Tuple
 
 from loguru import logger
 
 from ..provider_interface import IEcsClient
+from .ssh_check import (
+    SSH_CHECK_MAX_IN_FLIGHT,
+    SSH_CHECK_THREADS_PER_PROCESS,
+    SSHCheckResult,
+    SSHCheckTask,
+    submit_ssh_check_batch,
+)
 from .types import Instance, InstanceType
 from utils.counter import get_global_counter
-from utils.wait_until import WaitUntilTimeoutError, wait_until
-
-
-def _read_env_int(name: str, default: int, *, min_value: int = 0) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return max(min_value, int(raw))
-    except ValueError:
-        return default
-
-
-_DEFAULT_SSH_CHECK_PROCESS_WORKERS = max(1, os.cpu_count() or 1)
-SSH_CHECK_PROCESS_WORKERS = _read_env_int(
-    "SSH_CHECK_PROCESS_WORKERS",
-    _DEFAULT_SSH_CHECK_PROCESS_WORKERS,
-    min_value=1,
-)
-SSH_CHECK_THREADS_PER_PROCESS = 128
-_DEFAULT_SSH_CHECK_MAX_IN_FLIGHT = max(
-    128,
-    SSH_CHECK_PROCESS_WORKERS * SSH_CHECK_THREADS_PER_PROCESS,
-)
-SSH_CHECK_MAX_IN_FLIGHT = _read_env_int(
-    "SSH_CHECK_MAX_IN_FLIGHT",
-    _DEFAULT_SSH_CHECK_MAX_IN_FLIGHT,
-    min_value=1,
-)
-
-_SSH_CHECK_POOL = None
-_SSH_CHECK_POOL_LOCK = threading.Lock()
-_SSH_CHECK_PROCESS_THREAD_POOL = None
-
-
-def _initialize_ssh_check_worker_process():
-    global _SSH_CHECK_PROCESS_THREAD_POOL
-    if _SSH_CHECK_PROCESS_THREAD_POOL is None:
-        _SSH_CHECK_PROCESS_THREAD_POOL = ThreadPoolExecutor(
-            max_workers=SSH_CHECK_THREADS_PER_PROCESS
-        )
-
-
-def _run_ssh_checks_in_batch(batch: List[Tuple[str, str, str]]) -> List[Tuple[str, str, str, bool]]:
-    if not batch:
-        return []
-
-    if _SSH_CHECK_PROCESS_THREAD_POOL is None:
-        _initialize_ssh_check_worker_process()
-    pool = _SSH_CHECK_PROCESS_THREAD_POOL
-    if pool is None:
-        raise RuntimeError("SSH check worker process thread pool was not initialized")
-
-    futures = [
-        (
-            instance_id, public_ip, private_ip,
-            pool.submit(_wait_for_ssh_port_ready, public_ip),
-        )
-        for instance_id, public_ip, private_ip in batch
-    ]
-    results: List[Tuple[str, str, str, bool]] = []
-    for instance_id, public_ip, private_ip, future in futures:
-        try:
-            is_success = future.result()
-        except Exception:
-            logger.exception(
-                f"SSH check worker thread failed for instance {instance_id}, ip {public_ip}"
-            )
-            is_success = False
-        results.append((instance_id, public_ip, private_ip, is_success))
-    return results
-
-
-def _get_ssh_check_pool():
-    global _SSH_CHECK_POOL
-    if _SSH_CHECK_POOL is None:
-        with _SSH_CHECK_POOL_LOCK:
-            if _SSH_CHECK_POOL is None:
-                _SSH_CHECK_POOL = ProcessPoolExecutor(
-                    max_workers=SSH_CHECK_PROCESS_WORKERS,
-                    initializer=_initialize_ssh_check_worker_process,
-                )
-    return _SSH_CHECK_POOL
 
 
 def _summarize_instance_ids(instance_ids: Set[str], *, sample_size: int = 8) -> str:
@@ -164,6 +85,125 @@ class InstanceVerifier:
                 self._pending_nodes_count += instance.type.nodes
             self._state_changed.notify_all()
 
+    def _remove_pending_instance(self, instance_id: str):
+        instance = self.pending_instances.pop(instance_id, None)
+        if instance is not None:
+            self._pending_nodes_count -= instance.type.nodes
+        return instance
+
+    def _mark_ready_instance(self, instance: Instance, public_ip: str, private_ip: str):
+        self.ready_instances.append((instance, public_ip, private_ip))
+        self._ready_nodes_count += instance.type.nodes
+
+    def _has_reached_target(self):
+        return self._ready_nodes_count >= self.target_nodes
+
+    def _current_pending_instance_ids(self) -> Set[str]:
+        with self._lock:
+            return set(self.pending_instances)
+
+    def _drain_running_queue(self, submit_queue: deque[SSHCheckTask]) -> bool:
+        progressed = False
+        try:
+            while True:
+                running_instances = self._running_queue.get_nowait()
+                for instance_id, (public_ip, private_ip) in running_instances.items():
+                    submit_queue.append((instance_id, public_ip, private_ip))
+                progressed = True
+        except queue.Empty:
+            return progressed
+
+    def _next_ssh_batch(
+        self,
+        submit_queue: deque[SSHCheckTask],
+        inflight_instance_ids: Set[str],
+    ) -> list[SSHCheckTask]:
+        remaining_capacity = max(0, SSH_CHECK_MAX_IN_FLIGHT - len(inflight_instance_ids))
+        if remaining_capacity == 0 or not submit_queue:
+            return []
+
+        batch_limit = min(
+            SSH_CHECK_THREADS_PER_PROCESS,
+            remaining_capacity,
+            len(submit_queue),
+        )
+        batch: list[SSHCheckTask] = []
+        while submit_queue and len(batch) < batch_limit:
+            instance_id, public_ip, private_ip = submit_queue.popleft()
+            if instance_id in inflight_instance_ids:
+                continue
+            inflight_instance_ids.add(instance_id)
+            batch.append((instance_id, public_ip, private_ip))
+        return batch
+
+    def _submit_ssh_batches(
+        self,
+        submit_queue: deque[SSHCheckTask],
+        inflight_instance_ids: Set[str],
+    ) -> bool:
+        progressed = False
+        while submit_queue:
+            batch = self._next_ssh_batch(submit_queue, inflight_instance_ids)
+            if not batch:
+                break
+
+            future = submit_ssh_check_batch(batch)
+            future.add_done_callback(
+                lambda future, batch=batch: self._enqueue_ssh_batch_result(batch, future)
+            )
+            progressed = True
+        return progressed
+
+    def _apply_ssh_result(self, result: SSHCheckResult) -> bool:
+        instance_id, public_ip, private_ip, is_success = result
+        if is_success:
+            logger.info(
+                f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect success ({get_global_counter('ssh_check').increment()})"
+            )
+            with self._state_changed:
+                instance = self._remove_pending_instance(instance_id)
+                if instance is None:
+                    return False
+                self._mark_ready_instance(instance, public_ip, private_ip)
+                return True
+
+        logger.info(
+            f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect fail (timeout)"
+        )
+        with self._state_changed:
+            return self._remove_pending_instance(instance_id) is not None
+
+    def _drain_ssh_results(self, inflight_instance_ids: Set[str]) -> tuple[bool, bool]:
+        progressed = False
+        state_changed = False
+
+        while True:
+            try:
+                result = self._ssh_result_queue.get_nowait()
+            except queue.Empty:
+                return progressed, state_changed
+
+            inflight_instance_ids.discard(result[0])
+            progressed = True
+            if self._apply_ssh_result(result):
+                state_changed = True
+
+    def _remove_lost_instances(self, lost_instances: Set[str]) -> bool:
+        if not lost_instances:
+            return False
+
+        logger.info(
+            f"Instances {lost_instances} lost or stopped in region {self.region_id}"
+        )
+        with self._state_changed:
+            state_changed = False
+            for instance_id in lost_instances:
+                if self._remove_pending_instance(instance_id) is not None:
+                    state_changed = True
+            if state_changed:
+                self._state_changed.notify_all()
+            return state_changed
+
     @property
     def ready_nodes(self):
         with self._lock:
@@ -194,17 +234,17 @@ class InstanceVerifier:
 
                 # 剩下的情况里，ready 不满足，但 ready + pending 满足，或者 wait_for_pendings 是 true，需要等待 pending 的结果
                 if not self._state_changed.wait(timeout=180):
-                    raise Exception(
+                    raise RegionProvisioningTimeoutError(
                         f"Region {self.region_id} wait for event timeout")
 
     def describe_instances_loop(self, client: IEcsClient, check_interval: float = 3.0):
         processed_instances: Set[str] = set()
 
         while self.is_running():
-            # 获取当前 pending instance
-            with self._lock:
-                to_check_instances = set(
-                    self.pending_instances) - processed_instances
+            to_check_instances = self._current_pending_instance_ids() - processed_instances
+            if not to_check_instances:
+                time.sleep(check_interval)
+                continue
 
             instance_status = client.describe_instance_status(self.region_id, instance_ids=list(to_check_instances))
 
@@ -223,17 +263,10 @@ class InstanceVerifier:
             lost_instances = to_check_instances - \
                 set(instance_status.running_instances) - instance_status.pending_instances
 
-            with self._state_changed:
-                if len(lost_instances) > 0:
-                    logger.info(
-                        f"Instances {lost_instances} lost or stopped in region {self.region_id}")
-                    for instance_id in lost_instances:
-                        instance = self.pending_instances.pop(instance_id, None)
-                        if instance is not None:
-                            self._pending_nodes_count -= instance.type.nodes
-                    self._state_changed.notify_all()
+            self._remove_lost_instances(lost_instances)
 
-                if self._ready_nodes_count >= self.target_nodes:
+            with self._state_changed:
+                if self._has_reached_target():
                     logger.info(
                         f"Region {self.region_id} reach target nodes, thread describe_instances loop exit")
                     return
@@ -242,83 +275,24 @@ class InstanceVerifier:
         logger.info(f"Region {self.region_id} not reach target nodes, thread describe_instances is stopped manually.")
 
     def wait_for_ssh_loop(self):
-        submit_queue: deque[Tuple[str, str, str]] = deque()
+        submit_queue: deque[SSHCheckTask] = deque()
         inflight_instance_ids: Set[str] = set()
 
         while self.is_running():
-            progressed = False
-            state_changed = False
-
-            # 从队列获取任务并提交
-            try:
-                while True:
-                    running_instances = self._running_queue.get_nowait()
-                    for instance_id, (public_ip, private_ip) in running_instances.items():
-                        submit_queue.append((instance_id, public_ip, private_ip))
-                    progressed = True
-            except queue.Empty:
-                pass
-
-            while submit_queue and len(inflight_instance_ids) < SSH_CHECK_MAX_IN_FLIGHT:
-                batch_capacity = min(
-                    SSH_CHECK_THREADS_PER_PROCESS,
-                    SSH_CHECK_MAX_IN_FLIGHT - len(inflight_instance_ids),
-                    len(submit_queue),
-                )
-                batch: List[Tuple[str, str, str]] = []
-                while submit_queue and len(batch) < batch_capacity:
-                    instance_id, public_ip, private_ip = submit_queue.popleft()
-                    if instance_id in inflight_instance_ids:
-                        continue
-                    inflight_instance_ids.add(instance_id)
-                    batch.append((instance_id, public_ip, private_ip))
-
-                if not batch:
-                    break
-
-                future = _get_ssh_check_pool().submit(_run_ssh_checks_in_batch, batch)
-                future.add_done_callback(
-                    lambda future, batch=batch:
-                    self._enqueue_ssh_batch_result(batch, future)
-                )
+            progressed = self._drain_running_queue(submit_queue)
+            if self._submit_ssh_batches(submit_queue, inflight_instance_ids):
                 progressed = True
 
-            while True:
-                try:
-                    instance_id, public_ip, private_ip, is_success = self._ssh_result_queue.get_nowait()
-                except queue.Empty:
-                    break
-
-                inflight_instance_ids.discard(instance_id)
+            result_progressed, state_changed = self._drain_ssh_results(inflight_instance_ids)
+            if result_progressed:
                 progressed = True
-                if is_success:
-                    logger.info(
-                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect success ({get_global_counter('ssh_check').increment()})")
-
-                    with self._state_changed:
-                        instance = self.pending_instances.pop(instance_id, None)
-                        if instance is None:
-                            continue
-                        self._pending_nodes_count -= instance.type.nodes
-                        self.ready_instances.append((instance, public_ip, private_ip))
-                        self._ready_nodes_count += instance.type.nodes
-                        state_changed = True
-                else:
-                    logger.info(
-                        f"Region {self.region_id} Instance {instance_id} IP {public_ip} connect fail (timeout)")
-                    with self._state_changed:
-                        instance = self.pending_instances.pop(instance_id, None)
-                        if instance is None:
-                            continue
-                        self._pending_nodes_count -= instance.type.nodes
-                        state_changed = True
 
             if state_changed:
                 with self._state_changed:
                     self._state_changed.notify_all()
 
             with self._lock:
-                if self._ready_nodes_count >= self.target_nodes:
+                if self._has_reached_target():
                     logger.info(
                         f"Region {self.region_id} reach target nodes, thread wait_for_ssh_loop exit")
                     return
@@ -327,7 +301,7 @@ class InstanceVerifier:
                 time.sleep(0.2)
         logger.info(f"Region {self.region_id} not reach target nodes, thread wait_for_ssh_loop is stopped manually.")
 
-    def _enqueue_ssh_batch_result(self, batch: List[Tuple[str, str, str]], future):
+    def _enqueue_ssh_batch_result(self, batch: list[SSHCheckTask], future):
         try:
             results = future.result()
         except Exception:
@@ -341,33 +315,3 @@ class InstanceVerifier:
 
         for instance_id, public_ip, private_ip, is_success in results:
             self._ssh_result_queue.put((instance_id, public_ip, private_ip, is_success))
-
-def _check_port(ip: str, timeout: int = 5):
-    """
-    处理单个IP端口检查任务
-
-    Args:
-        ip: IP地址
-        port: 端口号
-        attempt: 当前尝试次数
-    """
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-
-    try:
-        result = sock.connect_ex((ip, 22))
-        return result == 0
-    except (socket.timeout, socket.error):
-        return False
-    finally:
-        sock.close()
-
-
-def _wait_for_ssh_port_ready(ip: str):
-    try:
-        wait_until(lambda: _check_port(ip), timeout=180)
-        return True
-    except WaitUntilTimeoutError:
-        logger.warning(f"Cannot connect to IP {ip}")
-        return False
