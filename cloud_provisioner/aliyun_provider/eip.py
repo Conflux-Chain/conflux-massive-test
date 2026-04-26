@@ -1,6 +1,8 @@
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Lock
 from typing import Callable, Iterable, Optional
 
 from alibabacloud_vpc20160428.client import Client as VpcClient
@@ -15,6 +17,44 @@ EIP_DESCRIBE_PAGE_SIZE = 100
 EIP_MAX_ALLOCATION_IDS_PER_DESCRIBE = 50
 EIP_WAIT_TIMEOUT_SECONDS = 120
 EIP_WAIT_RETRY_INTERVAL_SECONDS = 2
+EIP_RELEASE_MAX_CALLS = 600
+EIP_RELEASE_WINDOW_SECONDS = 60
+EIP_UNASSOCIATE_MAX_CALLS = 120
+EIP_UNASSOCIATE_WINDOW_SECONDS = 60
+
+
+class _SlidingWindowRateLimiter:
+    def __init__(self, max_calls: int, window_seconds: float):
+        self.max_calls = max_calls
+        self.window_seconds = window_seconds
+        self._lock = Lock()
+        self._timestamps: deque[float] = deque()
+
+    def acquire(self):
+        while True:
+            now = time.monotonic()
+            with self._lock:
+                cutoff = now - self.window_seconds
+                while self._timestamps and self._timestamps[0] <= cutoff:
+                    self._timestamps.popleft()
+                if len(self._timestamps) < self.max_calls:
+                    self._timestamps.append(now)
+                    return
+                sleep_for = self._timestamps[0] + self.window_seconds - now
+
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+
+_RELEASE_EIP_RATE_LIMITER = _SlidingWindowRateLimiter(
+    EIP_RELEASE_MAX_CALLS,
+    EIP_RELEASE_WINDOW_SECONDS,
+)
+
+_UNASSOCIATE_EIP_RATE_LIMITER = _SlidingWindowRateLimiter(
+    EIP_UNASSOCIATE_MAX_CALLS,
+    EIP_UNASSOCIATE_WINDOW_SECONDS,
+)
 EIP_TRANSIENT_RETRY_ATTEMPTS = 6
 EIP_TRANSIENT_RETRY_BASE_SECONDS = 1.0
 EIP_TRANSIENT_RETRY_MAX_SECONDS = 10.0
@@ -445,9 +485,7 @@ def _ensure_instance_eip(
     except Exception:
         if created_now:
             try:
-                vpc_client.release_eip_address(
-                    ReleaseEipAddressRequest(region_id=region_id, allocation_id=allocation_id)
-                )
+                _release_eip_address(vpc_client, region_id, allocation_id)
             except Exception as release_exc:
                 logger.warning(f"Failed to release EIP {allocation_id} after associate error: {release_exc}")
         raise
@@ -502,14 +540,32 @@ def _release_eip_resource(vpc_client: VpcClient, region_id: str, eip, context: s
         return False
 
     try:
-        vpc_client.release_eip_address(
-            ReleaseEipAddressRequest(region_id=region_id, allocation_id=allocation_id)
-        )
+        _release_eip_address(vpc_client, region_id, allocation_id)
         logger.info(f"Released Aliyun EIP {allocation_id} in {region_id} for {context}")
         return True
     except Exception as exc:
         logger.warning(f"Failed to release Aliyun EIP {allocation_id} in {region_id} for {context}: {exc}")
         return False
+
+
+def _release_eip_address(vpc_client: VpcClient, region_id: str, allocation_id: str):
+    _RELEASE_EIP_RATE_LIMITER.acquire()
+    vpc_client.release_eip_address(
+        ReleaseEipAddressRequest(region_id=region_id, allocation_id=allocation_id)
+    )
+
+
+def _unassociate_eip_address(vpc_client: VpcClient, region_id: str, allocation_id: str, instance_id: str):
+    _UNASSOCIATE_EIP_RATE_LIMITER.acquire()
+    vpc_client.unassociate_eip_address(
+        UnassociateEipAddressRequest(
+            region_id=region_id,
+            allocation_id=allocation_id,
+            instance_id=instance_id,
+            instance_type=ECS_INSTANCE_TYPE,
+            force=True,
+        )
+    )
 
 
 def _request_eip_release_preparation(vpc_client: VpcClient, region_id: str, eip, context: str) -> bool:
@@ -522,15 +578,7 @@ def _request_eip_release_preparation(vpc_client: VpcClient, region_id: str, eip,
         return True
 
     try:
-        vpc_client.unassociate_eip_address(
-            UnassociateEipAddressRequest(
-                region_id=region_id,
-                allocation_id=allocation_id,
-                instance_id=instance_id,
-                instance_type=ECS_INSTANCE_TYPE,
-                force=True,
-            )
-        )
+        _unassociate_eip_address(vpc_client, region_id, allocation_id, instance_id)
         return True
     except Exception as exc:
         logger.warning(f"Failed to unassociate Aliyun EIP {allocation_id} in {region_id} for {context}: {exc}")
