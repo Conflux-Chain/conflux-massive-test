@@ -27,17 +27,16 @@ def _read_env_int(name: str, default: int, *, min_value: int = 0) -> int:
         return default
 
 
-SSH_CHECK_THREAD_WORKERS = _read_env_int("SSH_CHECK_THREAD_WORKERS", 2000, min_value=1)
 _DEFAULT_SSH_CHECK_PROCESS_WORKERS = max(1, os.cpu_count() or 1)
 SSH_CHECK_PROCESS_WORKERS = _read_env_int(
     "SSH_CHECK_PROCESS_WORKERS",
     _DEFAULT_SSH_CHECK_PROCESS_WORKERS,
     min_value=1,
 )
-_DEFAULT_SSH_CHECK_MAX_IN_FLIGHT = (
-    max(128, SSH_CHECK_PROCESS_WORKERS * 8)
-    if SSH_CHECK_PROCESS_WORKERS > 0
-    else max(4000, SSH_CHECK_THREAD_WORKERS * 2)
+SSH_CHECK_THREADS_PER_PROCESS = 128
+_DEFAULT_SSH_CHECK_MAX_IN_FLIGHT = max(
+    128,
+    SSH_CHECK_PROCESS_WORKERS * SSH_CHECK_THREADS_PER_PROCESS,
 )
 SSH_CHECK_MAX_IN_FLIGHT = _read_env_int(
     "SSH_CHECK_MAX_IN_FLIGHT",
@@ -47,6 +46,45 @@ SSH_CHECK_MAX_IN_FLIGHT = _read_env_int(
 
 _SSH_CHECK_POOL = None
 _SSH_CHECK_POOL_LOCK = threading.Lock()
+_SSH_CHECK_PROCESS_THREAD_POOL = None
+
+
+def _initialize_ssh_check_worker_process():
+    global _SSH_CHECK_PROCESS_THREAD_POOL
+    if _SSH_CHECK_PROCESS_THREAD_POOL is None:
+        _SSH_CHECK_PROCESS_THREAD_POOL = ThreadPoolExecutor(
+            max_workers=SSH_CHECK_THREADS_PER_PROCESS
+        )
+
+
+def _run_ssh_checks_in_batch(batch: List[Tuple[str, str, str]]) -> List[Tuple[str, str, str, bool]]:
+    if not batch:
+        return []
+
+    if _SSH_CHECK_PROCESS_THREAD_POOL is None:
+        _initialize_ssh_check_worker_process()
+    pool = _SSH_CHECK_PROCESS_THREAD_POOL
+    if pool is None:
+        raise RuntimeError("SSH check worker process thread pool was not initialized")
+
+    futures = [
+        (
+            instance_id, public_ip, private_ip,
+            pool.submit(_wait_for_ssh_port_ready, public_ip),
+        )
+        for instance_id, public_ip, private_ip in batch
+    ]
+    results: List[Tuple[str, str, str, bool]] = []
+    for instance_id, public_ip, private_ip, future in futures:
+        try:
+            is_success = future.result()
+        except Exception:
+            logger.exception(
+                f"SSH check worker thread failed for instance {instance_id}, ip {public_ip}"
+            )
+            is_success = False
+        results.append((instance_id, public_ip, private_ip, is_success))
+    return results
 
 
 def _get_ssh_check_pool():
@@ -54,10 +92,10 @@ def _get_ssh_check_pool():
     if _SSH_CHECK_POOL is None:
         with _SSH_CHECK_POOL_LOCK:
             if _SSH_CHECK_POOL is None:
-                if SSH_CHECK_PROCESS_WORKERS > 0:
-                    _SSH_CHECK_POOL = ProcessPoolExecutor(max_workers=SSH_CHECK_PROCESS_WORKERS)
-                else:
-                    _SSH_CHECK_POOL = ThreadPoolExecutor(max_workers=SSH_CHECK_THREAD_WORKERS)
+                _SSH_CHECK_POOL = ProcessPoolExecutor(
+                    max_workers=SSH_CHECK_PROCESS_WORKERS,
+                    initializer=_initialize_ssh_check_worker_process,
+                )
     return _SSH_CHECK_POOL
 
 
@@ -222,15 +260,27 @@ class InstanceVerifier:
                 pass
 
             while submit_queue and len(inflight_instance_ids) < SSH_CHECK_MAX_IN_FLIGHT:
-                instance_id, public_ip, private_ip = submit_queue.popleft()
-                if instance_id in inflight_instance_ids:
-                    continue
-                future = _get_ssh_check_pool().submit(_wait_for_ssh_port_ready, public_ip)
-                future.add_done_callback(
-                    lambda future, instance_id=instance_id, public_ip=public_ip, private_ip=private_ip:
-                    self._enqueue_ssh_result(instance_id, public_ip, private_ip, future)
+                batch_capacity = min(
+                    SSH_CHECK_THREADS_PER_PROCESS,
+                    SSH_CHECK_MAX_IN_FLIGHT - len(inflight_instance_ids),
+                    len(submit_queue),
                 )
-                inflight_instance_ids.add(instance_id)
+                batch: List[Tuple[str, str, str]] = []
+                while submit_queue and len(batch) < batch_capacity:
+                    instance_id, public_ip, private_ip = submit_queue.popleft()
+                    if instance_id in inflight_instance_ids:
+                        continue
+                    inflight_instance_ids.add(instance_id)
+                    batch.append((instance_id, public_ip, private_ip))
+
+                if not batch:
+                    break
+
+                future = _get_ssh_check_pool().submit(_run_ssh_checks_in_batch, batch)
+                future.add_done_callback(
+                    lambda future, batch=batch:
+                    self._enqueue_ssh_batch_result(batch, future)
+                )
                 progressed = True
 
             while True:
@@ -277,13 +327,20 @@ class InstanceVerifier:
                 time.sleep(0.2)
         logger.info(f"Region {self.region_id} not reach target nodes, thread wait_for_ssh_loop is stopped manually.")
 
-    def _enqueue_ssh_result(self, instance_id: str, public_ip: str, private_ip: str, future):
+    def _enqueue_ssh_batch_result(self, batch: List[Tuple[str, str, str]], future):
         try:
-            is_success = future.result()
+            results = future.result()
         except Exception:
-            logger.exception(f"SSH check worker failed for region {self.region_id}, instance {instance_id}, ip {public_ip}")
-            is_success = False
-        self._ssh_result_queue.put((instance_id, public_ip, private_ip, is_success))
+            logger.exception(
+                f"SSH check batch worker failed for region {self.region_id}, batch_size={len(batch)}"
+            )
+            results = [
+                (instance_id, public_ip, private_ip, False)
+                for instance_id, public_ip, private_ip in batch
+            ]
+
+        for instance_id, public_ip, private_ip, is_success in results:
+            self._ssh_result_queue.put((instance_id, public_ip, private_ip, is_success))
 
 def _check_port(ip: str, timeout: int = 5):
     """
