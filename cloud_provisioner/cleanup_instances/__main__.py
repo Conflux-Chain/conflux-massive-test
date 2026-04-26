@@ -28,6 +28,7 @@ AWS_REGIONS = [
     "ap-east-1",   # Hong Kong
     "sa-east-1",   # São Paulo
     "af-south-1",  # Cape Town
+    # "me-south-1",  # Bahrain (Bombed)
     "me-south-1",  # Bahrain
     "ap-southeast-6",  # New Zealand
     "eu-south-1",  # Milan
@@ -96,7 +97,8 @@ if __name__ == "__main__":
             executor.submit(delete_instances, tencent_client, TENCENT_REGIONS, predicate=predicate),
         ]
         from concurrent.futures import wait
-
-        wait(futures)
+        
+        for future in futures:
+            future.result()
         
         
