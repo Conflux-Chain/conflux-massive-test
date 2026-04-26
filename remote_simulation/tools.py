@@ -105,6 +105,10 @@ def collect_logs(nodes: List[RemoteNode], local_path: str = "./logs", *, max_wor
     fail_cnt = sum(results)
     
 def collect_logs_v2(nodes: List[RemoteNode], local_path: str) -> None:
+    if not nodes:
+        logger.info("没有成功启动的节点，跳过节点日志收集")
+        return
+
     total_cnt = len(nodes)
     counter1 = AtomicCounter()
     counter2 = AtomicCounter()
@@ -143,14 +147,14 @@ def collect_logs_v2(nodes: List[RemoteNode], local_path: str) -> None:
             logger.warning(f"节点 {node.id} 日志同步遇到问题: {exc}")
             return 1
 
-    with ThreadPoolExecutor(max_workers=2000) as gen_executor:
+    with ThreadPoolExecutor(max_workers=max(1, min(2000, total_cnt))) as gen_executor:
         gen_results = list(gen_executor.map(_generate, nodes))
 
     gen_success_nodes = [n for n, ok in gen_results if ok]
     gen_success_cnt = len(gen_success_nodes)
     logger.info(f"日志生成阶段完成: 成功 {gen_success_cnt}/{total_cnt}，准备开始同步阶段")
 
-    with ThreadPoolExecutor(max_workers=64) as sync_executor:
+    with ThreadPoolExecutor(max_workers=max(1, min(64, gen_success_cnt))) as sync_executor:
         sync_results = list(sync_executor.map(_sync, gen_success_nodes))
 
     sync_failures = sum(sync_results)

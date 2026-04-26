@@ -19,5 +19,17 @@ echo "DefaultTasksMax=65535" | sudo tee -a /etc/systemd/system.conf
 sudo mkdir -p /etc/systemd/logind.conf.d
 echo "[Login] \nUserTasksMax=infinity" | sudo tee -a /etc/systemd/logind.conf.d/override.conf
 
-# sudo apt update
-# sudo apt install -y iotop
+if command -v apt-get >/dev/null 2>&1; then
+	packages=()
+
+	command -v strace >/dev/null 2>&1 || packages+=(strace)
+	command -v mpstat >/dev/null 2>&1 || packages+=(sysstat)
+	command -v ss >/dev/null 2>&1 || packages+=(iproute2)
+	command -v tcpdump >/dev/null 2>&1 || packages+=(tcpdump)
+	command -v 7z >/dev/null 2>&1 || packages+=(p7zip-full)
+
+	if [ ${#packages[@]} -gt 0 ]; then
+		sudo apt-get update
+		sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+	fi
+fi

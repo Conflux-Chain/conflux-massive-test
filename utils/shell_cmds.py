@@ -6,6 +6,18 @@ from typing import List
 from loguru import logger
 
 
+def _summarize_process_output(output: str | bytes | bytearray | memoryview | None, limit: int = 500) -> str:
+    if output is None:
+        return ""
+    if not isinstance(output, str):
+        output = bytes(output).decode(errors="replace")
+
+    output = output.strip()
+    if len(output) <= limit:
+        return output
+    return f"{output[:limit]}..."
+
+
 def _ssh_key_args() -> List[str]:
     key_path = os.getenv("SSH_KEY_PATH", "keys/ssh-key.pem").strip()
     if not key_path:
@@ -41,7 +53,7 @@ def scp(
                 logger.debug(f"{ip_address} SCP 失败，已达到最大重试次数")
                 raise
 
-def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: str = "ubuntu", compress_level: int = 12, max_retries: int = 3):
+def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: str = "ubuntu", compress_level: int = 12, max_retries: int = 3, timeout_sec: int = 20):
     key_args = _ssh_key_args()
     key_opt = "" if not key_args else f" -i {key_args[1]}"
     rsync_cmd = [
@@ -60,7 +72,7 @@ def rsync_download(remote_path: str, local_path: str, ip_address: str, *, user: 
     # Python 层面实现重试
     for attempt in range(max_retries):
         try:
-            completed = subprocess.run(rsync_cmd, check=True, capture_output=True, text=True, timeout=20)
+            completed = subprocess.run(rsync_cmd, check=True, capture_output=True, text=True, timeout=timeout_sec)
             # logger.debug(f"rsync completed: {completed.stdout}")
             return  # 成功则返回
         except subprocess.CalledProcessError as e:
@@ -106,9 +118,13 @@ def ssh(ip_address: str, user: str = "ubuntu", command: str | List[str] | None =
             result = subprocess.run(ssh_cmd, check=True, capture_output=True, text=True)
             return result
         except subprocess.CalledProcessError as e:
+            stdout = _summarize_process_output(e.stdout)
+            stderr = _summarize_process_output(e.stderr)
             if attempt < max_retries - 1:
-                logger.debug(f"{ip_address} SSH 失败 (尝试 {attempt + 1}/{max_retries}), {retry_delay} 秒后重试...  {e}")
+                logger.debug(
+                    f"{ip_address} SSH 失败 (尝试 {attempt + 1}/{max_retries}), {retry_delay} 秒后重试... {e}; stdout={stdout!r}; stderr={stderr!r}"
+                )
                 time.sleep(retry_delay)
             else:
-                logger.debug(f"{ip_address} SSH 失败，已达到最大重试次数")
+                logger.debug(f"{ip_address} SSH 失败，已达到最大重试次数; stdout={stdout!r}; stderr={stderr!r}")
                 raise
