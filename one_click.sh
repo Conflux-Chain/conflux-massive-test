@@ -57,7 +57,7 @@ mkdir -p $LOG_PATH
 
 # --- 步骤 1: 创建实例 ---
 print_separator "步骤 1/3: 创建云服务实例..."
-$PYTHON -m cloud_provisioner.create_instances -c $REQUEST_CONFIG_PATH
+$PYTHON -m cloud_provisioner.create_instances -c $REQUEST_CONFIG_PATH -l $LOG_PATH
 cp $REQUEST_CONFIG_PATH $LOG_PATH/request_config.toml
 
 # --- 步骤 2: 远程模拟 ---

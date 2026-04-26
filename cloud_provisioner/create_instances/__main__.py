@@ -48,6 +48,12 @@ def make_parser():
         dest="allow_backfill",
         help="禁用跨区域补足节点"
     )
+    parser.add_argument(
+        "-l", "--log-path",
+        type=str,
+        default=None,
+        help="日志存储路径"
+    )
     parser.set_defaults(allow_backfill=True)
     return parser
 
@@ -57,9 +63,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     load_dotenv()
-    
+
     from utils.logger import configure_logger
     configure_logger()
+
+    if args.log_path:
+        logger.add(f"{args.log_path}/provision.log", encoding="utf-8")
 
     with open(args.request_config, "rb") as f:
         data = tomllib.load(f)
